@@ -1,0 +1,78 @@
+# The `wiz` check — one file per WIZ tenant.
+#
+# This is the *shape*: every key the type accepts, with placeholder values and a
+# comment per knob saying what it decides. Copy it into your deployment's
+# `config/checks/` as `<tenant>_wiz.yaml`, and give each copy its own `path:`,
+# `api_url:` and credential references.
+#
+# What lives here is this installation's decision. What is true of the check type
+# — the band labels and their explanatory text — ships with the package.
+
+type: wiz
+path: /platform/wiz                     # the node this check owns
+title: WIZ security issues
+about: |
+  Open and in-progress security issues from **WIZ** (cloud security), grouped by
+  severity. [All open issues](https://app.wiz.io/issues).
+frequency: 10m
+timeout: 120s
+
+# --- Credentials --------------------------------------------------------------
+# Where the secrets live, never the secrets themselves (little-sister ADR-0023).
+# `env://NAME` reads that variable from `.env`; another `scheme://address` goes to
+# a resolver your deployment registers in its own code. Both are required — so two
+# checks of this type can each carry their own tenant's credentials.
+secrets:
+  client_id: env://PLATFORM_WIZ_CLIENT_ID
+  client_secret: env://PLATFORM_WIZ_CLIENT_SECRET
+
+# --- The endpoint ---------------------------------------------------------------
+# REQUIRED, and deliberately without a default: the WIZ GraphQL endpoint is
+# region-specific, so a guessed default would fail at the first run rather than at
+# load. Take yours from the WIZ console; it looks like `api.<region>.app.wiz.io`.
+api_url: https://api.<region>.app.wiz.io/graphql
+# token_url: https://auth.app.wiz.io/oauth/token   # default; tenant-independent
+
+# Issues fetched per run — a single page, not a pagination bound. Raise it if a
+# tenant has more open findings than this; nothing pages past it.
+first: 500
+
+# --- What a line is -------------------------------------------------------------
+# `id` (the default) — one line per WIZ **control**, naming every affected entity,
+# keyed by the control id. `entity` — one line per issue, keyed by the issue id.
+#
+# This is a **slug-shape decision**, so changing it on a running deployment retires
+# every maintenance pin made in the other mode: the pins are held against the old
+# identities and the new lines do not carry them.
+# aggregation_level: id
+
+# --- Grading ---------------------------------------------------------------------
+# severity -> status for a band that has findings; an empty band is always OK.
+# These are the type's own defaults, spelled out because the grading is a
+# deployment's call: `low` is WARN rather than OK so a low finding stays visible
+# (an OK band is dimmed, which reads the same as "nothing found"), and `medium`
+# sits with `high` on the "needs fixing" side.
+severity_map:
+  critical: ERROR
+  high: ERROR
+  medium: ERROR
+  low: WARN
+  informational: OK
+
+# WIZ control IDs to skip entirely — the findings you have decided not to act on.
+# Keep the reason beside each one; a bare id ages badly.
+ignore_control_ids: []
+#  - wc-1             # accepted risk — name who decided, and when
+#  - wc-2             # covered by a compensating control — name the control
+
+# --- Display text for the severity bands (title / about; little-sister ADR-0025) -
+# Built into the `wiz` check type (its `SUBNODES`), so it is not copied per tenant.
+# Add a `subnodes:` block only to change one: your text replaces the built-in
+# default, or extends it where you write {default} inside your text.
+#
+# subnodes:
+#   critical:
+#     about: |
+#       {default}
+#
+#       Page the on-call; a critical finding is not left overnight.
