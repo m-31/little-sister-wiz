@@ -11,7 +11,7 @@ band keeps reporting.
 
 ## The contract
 
-- **Requires** `little-sister >= 0.3.11` — a floor, never a pin.
+- **Requires** `little-sister >= 0.3.12` — a floor, never a pin.
 - **Runs on** Python **3.11 or newer** — the library's floor, not a higher
   one of its own.
 - **Registers** one check type: **`wiz`**.
@@ -19,14 +19,12 @@ band keeps reporting.
 ## Install
 
 ```toml
-# your deployment's pyproject.toml
+# your deployment's pyproject.toml — both come from the index
 [project]
-dependencies = ["little-sister", "little-sister-wiz"]
-
-# Only while *this* one comes from git: little-sister resolves from the index.
-# Delete the table once this package is on an index too — nothing else changes.
-[tool.uv.sources]
-little-sister-wiz = { git = "…/little-sister-wiz.git", tag = "v0.1.0" }
+# Pin them. A deployment names exact versions so an upgrade is a deliberate edit
+# rather than drift; a plugin is the one that declares a floor, because two plugins
+# that each pinned could not be installed together.
+dependencies = ["little-sister==0.3.12", "little-sister-wiz==0.1.0"]
 ```
 
 ```python
@@ -87,9 +85,42 @@ affected entity (`name`, `type`) — nothing else is requested.
 
 A band with findings takes its mapped status; the check's own node rolls up
 worst-of its bands. An issue with no id falls back to little-sister's content hash
-for its slug, never to a position in the list. Only stdlib `urllib` is used — the
-package has no dependency but little-sister itself, and TLS verification is always
-on.
+for its slug, never to a position in the list. The package has no dependency but
+little-sister itself, and TLS verification is always on — there is no setting to
+turn it off.
+
+## When WIZ is the one having a bad day
+
+A read that fails is not automatically a finding about your tenant, and this type tells
+the two apart by **status**
+([ADR-0002](docs/adr/0002-a-read-failure-is-not-a-finding.md)).
+
+| what came back | what you see |
+|---|---|
+| **5xx**, a dropped connection, or a `429`, three times | the node at **WARN**: `could not ask WIZ this run: …` — your cloud posture is not being graded for WIZ's weather |
+| **401 / 403** | **ERROR**: the client ID or secret is wrong or unauthorized, and only a person can fix it |
+| **GraphQL `errors`** inside a 200 | **ERROR**: WIZ answered and rejected the query |
+| an answer this check **cannot read** | **ERROR**: a missing payload, a changed schema. Waiting changes nothing |
+| a **3xx** | **ERROR**: `api_url` is wrong. Redirects are not followed, because urllib turns a POST into a GET when it follows one |
+
+A transient failure is **retried twice more**, one second apart, and a `429` waits as
+long as WIZ's `Retry-After` asks — but never longer than the run can afford. A reset
+twenty minutes out is reported rather than slept through: when to ask again is your
+`frequency:`.
+
+**The severity bands are not rewritten on a failed run.** They keep their previous
+reading and go stale on freshness, which says *this is the last thing we actually knew*
+rather than inventing five bands from an answer that never arrived.
+
+## One budget: `timeout:`
+
+`timeout:` is the **whole run's** deadline — the token exchange plus up to three query
+attempts — and each request's socket timeout is clamped to whatever is left of it. There
+is no separate per-request key: a run makes at most four requests, so the run's own
+budget is a sane bound for one of them too.
+
+**If you are upgrading, re-read your `timeout:`.** It used to be spent per request, so a
+value chosen for one request now bounds the whole run. The shipped example uses `120s`.
 
 ## Develop
 
@@ -104,7 +135,7 @@ follow this package into every deployment that installs it.
 ```toml
 # pyproject.toml — locally, never committed
 [tool.uv.sources]
-little-sister = { path = "../little-sister" }
+little-sister = { git = "file:///path/to/little-sister" }
 ```
 
 Restore `uv.lock` with it. The next `uv run` — the pre-commit gate is one — rewrites

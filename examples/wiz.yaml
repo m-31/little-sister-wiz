@@ -15,6 +15,11 @@ about: |
   Open and in-progress security issues from **WIZ** (cloud security), grouped by
   severity. [All open issues](https://app.wiz.io/issues).
 frequency: 10m
+# The **whole run's** budget — the token exchange plus up to three query attempts
+# together, each request clamped to whatever is left of it (ADR-0002). Generous because
+# a tenant's first page of issues is a large answer. There is no separate per-request
+# key: at four requests a run, this number is a sane bound for one request too. If you
+# are upgrading, note that it used to be spent per request and bounded nothing.
 timeout: 120s
 
 # --- Credentials --------------------------------------------------------------
@@ -66,9 +71,12 @@ ignore_control_ids: []
 #  - wc-2             # covered by a compensating control — name the control
 
 # --- Display text for the severity bands (title / about; little-sister ADR-0025) -
-# Built into the `wiz` check type (its `SUBNODES`), so it is not copied per tenant.
-# Add a `subnodes:` block only to change one: your text replaces the built-in
-# default, or extends it where you write {default} inside your text.
+# Built into the `wiz` check type, so it is not copied per tenant: the `about` prose
+# from its `SUBNODES`, and the title from the severity itself — a colored circle,
+# 🔴 🟠 🟡 🔵 🟢, with ❓ for a severity this package does not name. Add a `subnodes:`
+# block only to change one: your text replaces the built-in default, or extends it
+# where you write {default} inside your text. Write a `title:` there to have the word
+# back.
 #
 # subnodes:
 #   critical:

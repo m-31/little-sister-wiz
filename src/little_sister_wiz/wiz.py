@@ -5,8 +5,9 @@ issues over GraphQL, and reports one leaf per severity band under the check's no
 from ``critical`` through ``informational``. Each band is graded by a configurable
 ``severity_map`` and lists its findings. Findings are grouped by WIZ control ID by
 default; ``aggregation_level: entity`` gives one line per issue and affected entity.
-Ported from an older in-house alerting dashboard; the mapping and what was
-deliberately changed are in ``docs/migrating-security-checks.md``.
+Ported from an older in-house alerting dashboard. Why it is shaped this way — the
+band as the unit that grades, and what a line is keyed by — is
+``docs/adr/0001-severity-bands-are-what-grades.md``.
 
 A band's lines are **keyed entries** rather than plain strings (little-sister
 ADR-0036), slugged by the identity of the configured aggregation level — a WIZ
@@ -28,11 +29,12 @@ package's ``__init__`` pins.
 from __future__ import annotations
 
 import json
-import urllib.error
+import logging
+import time
 import urllib.parse
-import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from little_sister.checks import (
     Check,
@@ -46,32 +48,69 @@ from little_sister.checks import (
     register,
     resolve_text,
 )
+from little_sister.fetch import Response, fault_for, fetch, retry_after
 from little_sister.reasons import derived_slug, slug
 from little_sister.status import StatusCode
+from little_sister.transport import (
+    Deadline,
+    DeadlineExceeded,
+    Fault,
+    RemoteError,
+    ask,
+)
+
+#: This package's own logger. little-sister does not promise its ``logger`` to check
+#: authors and does not need to: the library configures the root handlers, so an
+#: ordinary module logger's records land in the same place, under a name that says
+#: which package emitted them.
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 TOKEN_URL = "https://auth.app.wiz.io/oauth/token"
 AGGREGATION_LEVELS = ("id", "entity")
 DEFAULT_AGGREGATION_LEVEL = "id"
+
+#: How many extra attempts a **transient** failure gets. Two, which is the three
+#: attempts the hand-rolled loop this replaced already made — the count is preserved
+#: deliberately, because what was wrong with that loop was not its length: it asked
+#: three times with **no wait at all**, and it retried ``502``/``503``/``504`` while
+#: letting the plainest transient status of all, a bare ``500``, through as final.
+TRANSIENT_RETRIES = 2
+
+#: The wait before each of those attempts. A retry with no backoff asks an endpoint
+#: that just failed again in the same millisecond, which is the one thing certain not
+#: to help — and it is spent only while the run's deadline can still afford it.
+RETRY_BACKOFF_SECONDS = 1.0
 
 # Built-in display text for the severity-band leaves this check emits (little-sister
 # ADR-0025). This text is type-inherent, so it is written once here rather than copied
 # into every deployment config; a second tenant's check is then config only. A check
 # config's `subnodes:` block replaces any of these, or extends one by writing
 # `{default}` into its own text; `nodes.yaml` still wins over both, per node path.
+#
+# **None of them names a code, and that is the rule rather than an omission.** These
+# texts used to read `graded ERROR` / `graded WARN` / `graded OK`, which is a setting
+# written as prose: `severity_map` is what decides a band's code, this constant cannot
+# see it, and a deployment that graded `medium` as WARN read `graded ERROR` on the
+# medium band's own page. What a severity *means* belongs here; what it is *graded*
+# belongs in the band's `config` card, where a reader expects what the check ran with
+# and where it is expanded from the map in force (`_band_config`).
+#
+# **No `title` here either**, and for a related reason: a band's title is derived
+# from its severity (`band_glyph`) rather than written per band, so the row cannot
+# grow a sixth entry whose colour nobody chose. What is authored here is prose.
 SUBNODES: dict[str, dict[str, str]] = {
-    "critical": {"title": "Critical",
-                 "about": "Critical-severity WIZ issues — fix immediately.\n\n"
+    "critical": {"about": "Critical-severity WIZ issues — fix immediately.\n\n"
                           "{entry_note}"},
-    "high": {"title": "High",
-             "about": "High-severity WIZ issues — graded ERROR.\n\n{entry_note}"},
-    "medium": {"title": "Medium",
-               "about": "Medium-severity WIZ issues — graded ERROR.\n\n"
-                        "{entry_note}"},
-    "low": {"title": "Low",
-            "about": "Low-severity WIZ issues — graded WARN, so they are visible "
-                     "without shouting.\n\n{entry_note}"},
-    "informational": {"title": "Informational",
-                      "about": "Informational WIZ findings — graded OK.\n\n"
+    "high": {"about": "High-severity WIZ issues — fix on the current sprint.\n\n"
+                      "{entry_note}"},
+    "medium": {"about": "Medium-severity WIZ issues — needs fixing, not only "
+                        "knowing.\n\n{entry_note}"},
+    "low": {"about": "Low-severity WIZ issues — worth knowing, and still work "
+                     "somebody has to schedule.\n\n{entry_note}"},
+    "informational": {"about": "Informational WIZ findings — nothing to do, watched "
+                               "so that a quiet band is visibly quiet.\n\n"
                                "{entry_note}"},
 }
 
@@ -102,6 +141,63 @@ ENTRY_NOTE = ENTRY_NOTES[DEFAULT_AGGREGATION_LEVEL]
 # Standard WIZ severities, worst first. This is the order the bands render in.
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "informational")
 
+
+def band_rank(severity: str) -> int:
+    """Where this band sorts among its siblings (little-sister ADR-0055).
+
+    The declared severities take `SEVERITY_ORDER`'s own sequence, worst first, and
+    anything else — a severity WIZ invents tomorrow, or one a `severity_map` names
+    that this package does not declare — lands after **all** of them and sorts by
+    name among its own kind.
+
+    **The ranks start at 1, and that is the whole subtlety.** `0` is not a neutral
+    value here: it is the rank the unranked carry, so it sorts *before* every
+    positive one (little-sister ADR-0055 decision 4). Leaving an undeclared band at
+    the default would put an unknown severity at the **front** of the row, which is
+    the opposite of what this is for.
+    """
+    try:
+        return SEVERITY_ORDER.index(severity) + 1
+    except ValueError:
+        return len(SEVERITY_ORDER) + 1
+
+#: A severity band's title: a colored circle, **by name and never by rank**.
+#:
+#: The band's name sits directly beside the title on every chip, so the circle costs
+#: a chip's width less than the word *Critical* and says the same thing faster —
+#: and where a surface draws the title *instead of* the name, little-sister now
+#: draws both (little-sister ADR-0061), so the word is never lost.
+#:
+#: **By name** was the decision, and the sister package is why. Ranking the ramp
+#: would make a colour mean *where this band sits in this row* rather than *how bad
+#: this is*: over there a deployment configures which severities are watched, so the
+#: same `high` is rank 1 in one aspect and rank 2 in the next, and would wear a
+#: different circle in each on one dashboard. Nobody reads a red circle that way. The
+#: rank still orders the row (little-sister ADR-0055); the colour is a different
+#: question with a different answer.
+#:
+#: `informational` is **green and not white**: the bottom of a severity scale is not
+#: the same statement as *nothing to do here, and that is the thing being watched*,
+#: which is what this band means and why it renders even while empty.
+BAND_GLYPHS = {
+    "critical": "🔴",
+    "high": "🟠",
+    "medium": "🟡",
+    "low": "🔵",
+    "informational": "🟢",
+}
+
+#: What a severity this package does not name gets. The band list is **open** — WIZ
+#: may add a severity tomorrow, and a `severity_map` may name one this package has
+#: never heard of — and a band with no colour must not borrow one. Worth keeping
+#: precisely because it is rare enough to mean something.
+UNKNOWN_BAND_GLYPH = "❓"
+
+
+def band_glyph(severity: str) -> str:
+    """The circle this severity wears, or `❓` where this package does not name it."""
+    return BAND_GLYPHS.get(severity, UNKNOWN_BAND_GLYPH)
+
 # Default severity to status mapping when the config does not override it. `low` is
 # WARN rather than OK: a low finding is still work somebody has to schedule, and a
 # band graded OK is dimmed on the dashboard, which is indistinguishable from "no
@@ -126,12 +222,39 @@ query Issues($first: Int, $filterBy: IssueFilters, $orderBy: IssueOrder) {
 """
 
 
-class WizError(Exception):
-    """A WIZ API request failed (``status`` is the HTTP code, when known)."""
+class WizError(RemoteError):
+    """A WIZ API request failed (``status`` is the HTTP code, when known).
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
+    A :class:`~little_sister.transport.RemoteError` subclass, which is what that class
+    is for: the vocabulary is the library's while the messages and every
+    ``except WizError`` here stay ours. ``fault`` is inherited and **required** — a
+    default would be the one decision this package must not take by accident
+    (little-sister ADR-0058), and it is what decides both whether a failure is worth
+    asking again and whether the node grades (ADR-0002).
+    """
+
+
+def _fault_and_wait(response: Response) -> tuple[Fault, float | None]:
+    """WIZ's answer, read as one of the three faults, plus any wait it asked for.
+
+    Almost all of this is :func:`~little_sister.fetch.fault_for`: a **5xx** means WIZ
+    failed to answer, and anything else *is* an answer. Two departures, and both are
+    about knowing whose API this is:
+
+    * **A ``429`` is transient here.** The library keeps it *answered*, because a 429
+      in general may be crawler protection with no stated end; this endpoint is an
+      authenticated API with a documented rate limit, and being over it is a *not now*.
+    * **A ``401``/``403`` is not.** Unlike the sister package there is no ambiguity to
+      resolve: this check holds one OAuth2 credential for a whole tenant, so a refusal
+      means the client ID or secret is wrong or unauthorized, and no amount of asking
+      again will change it. That is why this package needs **no vendor dialect reader**
+      — the standard ``Retry-After`` is the whole of what is read, and a header set we
+      have not verified is not something to invent.
+    """
+    asked = retry_after(response.headers)
+    if response.status == 429:
+        return Fault.TRANSIENT, asked
+    return fault_for(response.status), asked
 
 
 def _issue_link(issue_id: str, severity: str) -> str:
@@ -255,52 +378,164 @@ def _id_entries(items: list[dict[str, Any]],
 
 
 class WizClient:
-    """A minimal WIZ client over stdlib ``urllib`` (OAuth2 + GraphQL, TLS on)."""
+    """A minimal WIZ client: OAuth2 client credentials, then one GraphQL query.
+
+    **Two budgets, and they are not the same one** (ADR-0002). ``timeout`` bounds one
+    request; ``deadline``, when given, bounds **the whole run** and is checked before
+    every request — which matters here even though a run makes at most four of them,
+    because before it existed ``timeout:`` was handed to the socket layer per request
+    and so bounded nothing at all.
+
+    What is ours here is WIZ: the OAuth2 exchange, the GraphQL envelope and reading
+    that envelope's own error channel. The request, the budgets and the retry are the
+    library's (little-sister ADR-0058), which is what removed the hand-rolled loop
+    below — and TLS verification is still not a knob (ADR-0001 §5), now because
+    :func:`~little_sister.fetch.fetch` offers no way to make it one.
+    """
 
     def __init__(self, client_id: str, client_secret: str, *, api_url: str,
-                 token_url: str = TOKEN_URL, timeout: float = 60.0) -> None:
+                 token_url: str = TOKEN_URL, timeout: float = 60.0,
+                 deadline: Deadline | None = None,
+                 retries: int = TRANSIENT_RETRIES,
+                 backoff: float = RETRY_BACKOFF_SECONDS,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         self._client_id = client_id
         self._client_secret = client_secret
         self._api_url = api_url
         self._token_url = token_url
         self._timeout = timeout
+        self._deadline = deadline
+        self._retries = retries
+        self._backoff = backoff
+        self._sleep = sleep
         self._token: str | None = None
 
-    def _post(self, url: str, body: bytes,
-              headers: dict[str, str]) -> tuple[int, str]:
-        request = urllib.request.Request(url, data=body, method="POST",
-                                         headers=headers)
-        try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                return response.status, response.read().decode("utf-8")
-        except urllib.error.HTTPError as error:
-            return error.code, error.read().decode("utf-8", "replace")
-        except Exception as error:   # any transport failure
-            raise WizError(f"request failed for {url}: {error}") from error
+    def _post(self, url: str, body: bytes, headers: dict[str, str], *,
+              what: str) -> Response:
+        """One POST, and **every status comes back as an answer**.
 
-    def _get_token(self) -> str:
-        if self._token:
-            return self._token
+        That inversion is the point of :func:`~little_sister.fetch.fetch`: only a
+        request that never reached a status raises. It replaces a hand-rolled
+        ``urlopen`` whose ``except Exception`` was the widest clause in this package,
+        and whose ``(status, text)`` return left each caller to remember to look at the
+        status. No ``User-Agent`` is set: the library's own
+        ``little-sister/<version>`` is a name a WIZ support thread can do something
+        with, unlike the unversioned string this used to send.
+
+        Redirects are **not** followed, deliberately. ``urlopen`` followed them, and on
+        a redirect urllib turns a POST into a GET — so a misconfigured endpoint could
+        silently drop the request body and fail as something else. A 3xx from an API
+        endpoint means the URL is wrong, which for a region-specific ``api_url``
+        (ADR-0001 §6) is exactly what a reader needs to be told.
+        """
+        try:
+            return fetch(url, timeout=self._timeout, follow_redirects=False,
+                         method="POST", data=body, headers=headers,
+                         deadline=self._deadline)
+        except RemoteError as error:
+            # `fetch` attaches urllib's own exception as `__cause__`, so the sentence a
+            # reader gets is ours rather than a list of proxy paths and certificate
+            # directories. `DeadlineExceeded` is **not** a `RemoteError` and is not
+            # caught: it is about the run, not about this request.
+            raise WizError(f"{what} could not be sent to {url}: "
+                           f"{error.__cause__ or error}",
+                           status=error.status, fault=error.fault) from error
+
+    def _refusal(self, response: Response, what: str) -> WizError:
+        """A status WIZ refused with, read as one of the three faults."""
+        fault, wait = _fault_and_wait(response)
+        return WizError(f"{what}: HTTP {response.status}: {response.text()[:200]}",
+                        status=response.status, fault=fault, retry_after=wait)
+
+    def _ask(self, operation: Callable[[], _T]) -> _T:
+        """Run one request under the library's retry policy and nothing of our own.
+
+        `ask` retries only a `TRANSIENT` fault, only while attempts remain, and only
+        while the deadline can still afford the wait — and it spends a wait WIZ named
+        in place of the backoff. A wait longer than the run has left is refused and the
+        error re-raised: **pausing past the check's budget is not a request layer's
+        decision** (little-sister ADR-0058). When to ask again is `frequency:`.
+        """
+        return ask(operation, deadline=self._deadline, retries=self._retries,
+                   backoff=self._backoff, sleep=self._sleep)
+
+    def _token_request(self) -> str:
         body = urllib.parse.urlencode({
             "grant_type": "client_credentials",
             "audience": "wiz-api",
             "client_id": self._client_id,
             "client_secret": self._client_secret,
         }).encode("utf-8")
-        status, text = self._post(
+        response = self._post(
             self._token_url, body,
-            {"Content-Type": "application/x-www-form-urlencoded",
-             "User-Agent": "little-sister-wiz"})
-        if status != 200:
-            raise WizError(f"WIZ auth failed: HTTP {status}: {text[:200]}",
-                           status=status)
-        token = str(json.loads(text)["access_token"])
-        self._token = token
+            {"Content-Type": "application/x-www-form-urlencoded"},
+            what="WIZ auth")
+        if response.status != 200:
+            raise self._refusal(response, "WIZ auth failed")
+        try:
+            token = str(json.loads(response.body)["access_token"])
+        except (ValueError, KeyError, TypeError) as error:
+            # **It arrived and it cannot be used.** This used to escape as a bare
+            # `KeyError` or `JSONDecodeError` — past `run()`'s `except WizError`, so
+            # the engine turned the whole check into a traceback rather than a reading
+            # (little-sister ADR-0040). Not transient: the same request returns the
+            # same shape.
+            raise WizError(
+                f"WIZ auth answered {response.status} without a usable "
+                f"'access_token': {error}",
+                status=response.status, fault=Fault.MALFORMED) from error
         return token
+
+    def _get_token(self) -> str:
+        """The bearer token, fetched once per client and then reused.
+
+        A transient failure here is retried like any other. It was not before: the
+        token exchange sat outside the retry loop, so a single 503 from the auth
+        endpoint ended a run that the very next second would have completed.
+        """
+        if self._token:
+            return self._token
+        self._token = self._ask(self._token_request)
+        return self._token
+
+    def _query(self, payload: bytes, headers: dict[str, str]) -> list[dict[str, Any]]:
+        """One GraphQL POST, and the three ways it can fail to be a list of issues."""
+        response = self._post(self._api_url, payload, headers, what="WIZ query")
+        if response.status != 200:
+            raise self._refusal(response, "WIZ query failed")
+        try:
+            body = json.loads(response.body)
+        except ValueError as error:
+            raise WizError(f"WIZ answered the query with something that is not JSON: "
+                           f"{error}", status=response.status,
+                           fault=Fault.MALFORMED) from error
+        if not isinstance(body, dict):
+            raise WizError("WIZ answered the query with a JSON value that is not an "
+                           "object", status=response.status, fault=Fault.MALFORMED)
+        if body.get("errors"):
+            # GraphQL's own error channel, inside a 200. WIZ answered, and the answer
+            # is no — a rejected query, a field this credential may not read. Read as
+            # `ANSWERED` and never retried, and deliberately not by looking at the
+            # message text: a backend timeout can arrive this way too, and telling the
+            # two apart by prose is the rule this family does not break.
+            raise WizError(f"WIZ GraphQL errors: {body['errors']}",
+                           status=response.status, fault=Fault.ANSWERED)
+        issues = (body.get("data") or {}).get("issues")
+        if not isinstance(issues, dict) or not isinstance(issues.get("nodes"), list):
+            # **Green-when-blind, and it shipped.** This used to read
+            # `((data or {}).get("issues") or {}).get("nodes")` and hand back
+            # `list(… or [])`, so an answer with no payload in it — a schema change, a
+            # partial response — became *zero issues*, which is every band green and a
+            # tenant reported as clean. An empty `nodes` list is still zero issues; a
+            # missing one is no answer.
+            raise WizError("WIZ answered the query without a 'data.issues.nodes' "
+                           "list — nothing to read", status=response.status,
+                           fault=Fault.MALFORMED)
+        return list(issues["nodes"])
 
     def issues(self, first: int) -> list[dict[str, Any]]:
         """Open and in-progress issues, worst severity first (a single page of
-        ``first``, matching the original — see the doc's cap note)."""
+        ``first``, matching the original — see ADR-0001 §8's cap note)."""
         token = self._get_token()
         payload = json.dumps({
             "query": _ISSUES_QUERY,
@@ -311,21 +546,8 @@ class WizClient:
             },
         }).encode("utf-8")
         headers = {"Content-Type": "application/json",
-                   "Authorization": f"Bearer {token}",
-                   "User-Agent": "little-sister-wiz"}
-        for _ in range(3):
-            status, text = self._post(self._api_url, payload, headers)
-            if status in (502, 503, 504):
-                continue                       # transient — retry
-            if status != 200:
-                raise WizError(f"WIZ query failed: HTTP {status}: {text[:200]}",
-                               status=status)
-            body = json.loads(text)
-            if body.get("errors"):
-                raise WizError(f"WIZ GraphQL errors: {body['errors']}")
-            issues = ((body.get("data") or {}).get("issues") or {}).get("nodes")
-            return list(issues or [])
-        raise WizError("WIZ query failed after retries (5xx)")
+                   "Authorization": f"Bearer {token}"}
+        return self._ask(lambda: self._query(payload, headers))
 
 
 @register("wiz")
@@ -391,33 +613,118 @@ class WizCheck(Check):
         return config_markdown({
             "api": self.api_url,
             "aggregation": f"{self.aggregation_level} level",
+            "grading": self._grading_summary(),
             "ignored controls": str(len(self.ignore_control_ids) or ""),
         })
 
+    def _grading_summary(self) -> str:
+        """The whole map **in force**, for the check's own `config` card.
+
+        Here rather than in any `about` text because it is a setting, and because a
+        deployment that overrode `severity_map` has to be able to read *its* answer
+        somewhere; the band pages carry one row each, and this is the one place all
+        of them are visible together."""
+        codes = [self.severity_map[name] for name in self._band_order()
+                 if name in self.severity_map]
+        if not codes:
+            return "nothing graded"
+        if len(set(codes)) == 1:
+            # One answer for every band is worth saying once. Five identical arrows
+            # are a wall a reader skips, and skipping is how the setting stays
+            # invisible — which is the whole complaint this line answers.
+            return f"**{codes[0].name}** for every band"
+        return ", ".join(
+            f"`{name}` → **{self.severity_map[name].name}**"
+            for name in self._band_order() if name in self.severity_map)
+
+    def _band_order(self) -> list[str]:
+        """The declared severities first, then any a config added, by name.
+
+        The run's own loop orders by the severities *the data* brought as well, which
+        this cannot see; what it shares with that loop is the part that is a decision
+        rather than an observation — `SEVERITY_ORDER` first."""
+        return [*SEVERITY_ORDER,
+                *sorted(s for s in self.severity_map if s not in SEVERITY_ORDER)]
+
     def _meta(self, name: str) -> tuple[str, str]:
-        """The (title, about) for severity band `name`: this check type's built-in
-        `SUBNODES` text, which the config's `subnodes:` block replaces — or extends,
-        where it writes `{default}` into its own text (little-sister ADR-0025).
-        `{entry_note}` expands in either case, so a deployment that rewrites one
-        band's `about` can keep the shared explanation of the line format."""
+        """The (title, about) for severity band `name`.
+
+        The **title** is the band's glyph, derived from the severity rather than
+        authored — a severity this package has never heard of still gets one (`❓`),
+        which a per-band table could not promise. The **about** is this check type's
+        built-in prose. A config's `subnodes:` block replaces either — or extends it,
+        where it writes `{default}` into its own text (little-sister ADR-0025) — and
+        `{entry_note}` expands in every case, so a deployment that rewrites one band's
+        `about` keeps the shared explanation of the line format."""
         configured = self.subnodes.get(name, {})
         default = SUBNODES.get(name, {})
         tokens = {"entry_note": ENTRY_NOTES[self.aggregation_level]}
         return (resolve_text(configured.get("title", ""),
-                             default.get("title", ""), tokens),
+                             band_glyph(name), tokens),
                 resolve_text(configured.get("about", ""),
                              default.get("about", ""), tokens))
 
-    def _make_client(self, client_id: str, client_secret: str) -> WizClient:
-        """Build the API client. Overridden in tests to avoid live calls."""
+    def _band_config(self, severity: str) -> str:
+        """What this band ran with — the two facts a reader needs on its page.
+
+        `graded` is the code this severity maps to, and it says when the fallback is
+        what applied: a severity WIZ invents tomorrow reaches a band with no
+        `severity_map` entry, and a band quietly taking the fallback is the case a
+        reader cannot otherwise see. `when empty` is there because an empty green
+        band reads as *nothing found* when it means *nothing found, and that is the
+        thing being watched*."""
+        mapped = self.severity_map.get(severity)
+        return config_markdown({
+            "graded": (f"`{mapped.name}` when this band has findings"
+                       if mapped is not None else
+                       "`WARN` when this band has findings — no `severity_map` "
+                       "entry, so the fallback applies"),
+            "when empty": "`OK`, so a watched band's silence is visible",
+        })
+
+    def _new_deadline(self) -> Deadline:
+        """This run's budget. Overridden in tests, so a deadline can be spent without
+        a test spending one."""
+        return Deadline(self.timeout_seconds)
+
+    def _make_client(self, client_id: str, client_secret: str,
+                     deadline: Deadline | None = None) -> WizClient:
+        """Build the API client. Overridden in tests to avoid live calls.
+
+        ``timeout_seconds`` is handed over **twice, and it means two things**. As
+        ``timeout`` it bounds one request, exactly as before, so no single request is
+        tightened by this change. As the ``deadline`` it bounds the whole run, which
+        nothing did before: a run makes an auth request and then up to three query
+        attempts, and each of them used to be allowed the full budget. There is no
+        separate `request_timeout:` key here, unlike the sister package — at four
+        requests a run the run's own budget is a sane per-request bound too, and the
+        clamp does the rest (ADR-0002).
+        """
         return WizClient(client_id, client_secret, api_url=self.api_url,
-                         token_url=self.token_url, timeout=self.timeout_seconds)
+                         token_url=self.token_url, timeout=self.timeout_seconds,
+                         deadline=deadline)
 
     def run(self) -> CheckResult:
+        # `timeout:` is the whole run's budget and this is where it starts ticking.
+        deadline = self._new_deadline()
         try:
-            client = self._make_client(self.client_id, self.client_secret)
+            client = self._make_client(self.client_id, self.client_secret, deadline)
             issues = client.issues(self.first)
+        except DeadlineExceeded as cut:
+            # The run's own budget, not WIZ's fault and not the tenant's. Nothing was
+            # read, so unlike the sister package there is nothing partial to keep: this
+            # check's whole reading comes from one query.
+            return CheckResult(StatusCode.WARN, [plain(str(cut))])
         except WizError as error:
+            # **A read failure is not a finding about the tenant** (ADR-0002). *We
+            # could not ask* warns; an answer WIZ gave, and an answer we cannot read,
+            # still grade ERROR — a rejected credential and a changed schema are both
+            # real, and both are somebody's to fix.
+            if error.fault is Fault.TRANSIENT:
+                logger.warning("%s: could not ask WIZ (%s)", self.path, error)
+                return CheckResult(
+                    StatusCode.WARN,
+                    [f"could not ask WIZ this run: {plain(str(error))}"])
             return CheckResult(StatusCode.ERROR,
                                [f"WIZ query failed: {plain(str(error))}"])
 
@@ -429,10 +736,13 @@ class WizCheck(Check):
             severity = str(issue.get("severity") or "unknown").lower()
             groups.setdefault(severity, []).append(issue)
 
-        order = [*SEVERITY_ORDER,
-                 *(s for s in groups if s not in SEVERITY_ORDER)]
+        # Named `band_order` and not `order`: `order` is now a `CheckResult` field
+        # meaning a node's rank, and one name for the build sequence and the
+        # declared rank in one function is how the two drift apart.
+        band_order = [*SEVERITY_ORDER,
+                      *(s for s in groups if s not in SEVERITY_ORDER)]
         children: list[CheckResult] = []
-        for severity in order:
+        for severity in band_order:
             if severity not in self.severity_map and severity not in groups:
                 continue                       # not monitored and nothing found
             items = groups.get(severity, [])
@@ -449,5 +759,7 @@ class WizCheck(Check):
             children.append(CheckResult(
                 code, entries, name=severity,
                 description=f"{severity.capitalize()} WIZ issues",
-                title=title, about=about))
+                title=title, about=about,
+                order=band_rank(severity),
+                config=self._band_config(severity)))
         return CheckResult(StatusCode.OK, children=tuple(children))
