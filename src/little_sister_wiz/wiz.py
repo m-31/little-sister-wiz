@@ -23,7 +23,7 @@ configs. The OAuth2 credentials are named by the config's ``secrets:`` block and
 resolved once at construction (little-sister ADR-0023).
 
 Everything imported from little-sister below is part of its **check-authoring
-surface** (architecture.md §11), which is what the ``require_api(1)`` in this
+surface** (architecture.md §11), which is what the ``require_api(2)`` in this
 package's ``__init__`` pins.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ import json
 import logging
 import time
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -43,10 +43,8 @@ from little_sister.checks import (
     coerce_code,
     config_markdown,
     parse_secret_refs,
-    parse_subnodes,
     plain,
     register,
-    resolve_text,
 )
 from little_sister.fetch import Response, fault_for, fetch, retry_after
 from little_sister.reasons import derived_slug, slug
@@ -85,9 +83,12 @@ RETRY_BACKOFF_SECONDS = 1.0
 
 # Built-in display text for the severity-band leaves this check emits (little-sister
 # ADR-0025). This text is type-inherent, so it is written once here rather than copied
-# into every deployment config; a second tenant's check is then config only. A check
-# config's `subnodes:` block replaces any of these, or extends one by writing
-# `{default}` into its own text; `nodes.yaml` still wins over both, per node path.
+# into every deployment config; a second tenant's check is then config only. It is
+# **declared, not applied** — `_band_labels` hands it to little-sister as
+# `subnode_defaults` and the library resolves a deployment's `subnodes:` block over
+# it, replacing one of these or extending it where the config writes `{default}`, and
+# the engine writes the result per band name. `nodes.yaml` still wins over both, per
+# node path, and `{entry_note}` is a `label_tokens` entry expanded in either text.
 #
 # **None of them names a code, and that is the rule rather than an omission.** These
 # texts used to read `graded ERROR` / `graded WARN` / `graded OK`, which is a setting
@@ -99,7 +100,8 @@ RETRY_BACKOFF_SECONDS = 1.0
 #
 # **No `title` here either**, and for a related reason: a band's title is derived
 # from its severity (`band_glyph`) rather than written per band, so the row cannot
-# grow a sixth entry whose colour nobody chose. What is authored here is prose.
+# grow a sixth entry whose colour nobody chose. What is authored here is prose;
+# `_band_labels` is where the derived half joins it.
 SUBNODES: dict[str, dict[str, str]] = {
     "critical": {"about": "Critical-severity WIZ issues — fix immediately.\n\n"
                           "{entry_note}"},
@@ -197,6 +199,28 @@ UNKNOWN_BAND_GLYPH = "❓"
 def band_glyph(severity: str) -> str:
     """The circle this severity wears, or `❓` where this package does not name it."""
     return BAND_GLYPHS.get(severity, UNKNOWN_BAND_GLYPH)
+
+
+def _band_labels(severities: Iterable[str]) -> dict[str, dict[str, str]]:
+    """What this type **declares** for each band it can name at construction —
+    `name -> {title, about}`, little-sister's `subnode_defaults` (its ADR-0025).
+
+    Two halves meet here: the authored prose of :data:`SUBNODES`, and the derived
+    `title` — the band's glyph, which is a function of the severity rather than a
+    line somebody wrote. A band with no prose still declares its circle, so a
+    severity a `severity_map` names and this package does not describe is
+    labelled rather than bare, and a deployment writing `{default}` into a title
+    for it still gets that circle back.
+
+    What this cannot cover is a severity that appears **only in a run's
+    findings** — WIZ inventing one tomorrow. That band is named by the data, so
+    its glyph rides its `CheckResult`, which is the channel little-sister leaves
+    open for exactly that child.
+    """
+    return {severity: {"title": band_glyph(severity),
+                       **({"about": about} if (about := SUBNODES.get(
+                           severity, {}).get("about", "")) else {})}
+            for severity in sorted({*severities, *SUBNODES})}
 
 # Default severity to status mapping when the config does not override it. `low` is
 # WARN rather than OK: a low finding is still work somebody has to schedule, and a
@@ -558,10 +582,19 @@ class WizCheck(Check):
                  first: int = 500, severity_map: dict[str, StatusCode] | None = None,
                  ignore_control_ids: tuple[str, ...] = (),
                  aggregation_level: str = DEFAULT_AGGREGATION_LEVEL,
-                 subnodes: dict[str, dict[str, str]] | None = None,
                  client_id_ref: str, client_secret_ref: str,
                  **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+        # Both declarations are computed **before** the base constructor runs,
+        # because that is where little-sister resolves them against the
+        # deployment's `subnodes:` block (its ADR-0025) — and
+        # both are made of arguments rather than of attributes for the same
+        # reason. `self.severity_map` and `self.aggregation_level` are set from
+        # the same two values below, so nothing is read twice.
+        severities = {**DEFAULT_SEVERITY_MAP, **(severity_map or {})}
+        level = _parse_aggregation_level(aggregation_level)
+        super().__init__(subnode_defaults=_band_labels(severities),
+                         label_tokens={"entry_note": ENTRY_NOTES[level]},
+                         **kwargs)
         # Resolved **once here** from the references the config's `secrets:`
         # block names (little-sister ADR-0023) — never re-read during a run. An
         # unresolvable reference leaves these empty and records the failure, and
@@ -571,13 +604,9 @@ class WizCheck(Check):
         self.api_url = api_url
         self.token_url = token_url
         self.first = first
-        self.severity_map = {**DEFAULT_SEVERITY_MAP, **(severity_map or {})}
+        self.severity_map = severities
         self.ignore_control_ids = ignore_control_ids
-        self.aggregation_level = _parse_aggregation_level(aggregation_level)
-        # Per-band display text (title/about) from this check's own config
-        # (`subnodes:`), carried onto each severity leaf (little-sister
-        # ADR-0025).
-        self.subnodes = subnodes or {}
+        self.aggregation_level = level
 
     @classmethod
     def _extra_from_config(cls, config: dict[str, Any],
@@ -601,7 +630,6 @@ class WizCheck(Check):
             "ignore_control_ids": tuple(str(i) for i in ignore),
             "aggregation_level": _parse_aggregation_level(
                 config.get("aggregation_level", DEFAULT_AGGREGATION_LEVEL)),
-            "subnodes": parse_subnodes(config),
             # `secrets: {client_id: …, client_secret: …}` — required, so two
             # checks of this type can each carry their own credentials
             # (little-sister ADR-0023).
@@ -645,24 +673,6 @@ class WizCheck(Check):
         rather than an observation — `SEVERITY_ORDER` first."""
         return [*SEVERITY_ORDER,
                 *sorted(s for s in self.severity_map if s not in SEVERITY_ORDER)]
-
-    def _meta(self, name: str) -> tuple[str, str]:
-        """The (title, about) for severity band `name`.
-
-        The **title** is the band's glyph, derived from the severity rather than
-        authored — a severity this package has never heard of still gets one (`❓`),
-        which a per-band table could not promise. The **about** is this check type's
-        built-in prose. A config's `subnodes:` block replaces either — or extends it,
-        where it writes `{default}` into its own text (little-sister ADR-0025) — and
-        `{entry_note}` expands in every case, so a deployment that rewrites one band's
-        `about` keeps the shared explanation of the line format."""
-        configured = self.subnodes.get(name, {})
-        default = SUBNODES.get(name, {})
-        tokens = {"entry_note": ENTRY_NOTES[self.aggregation_level]}
-        return (resolve_text(configured.get("title", ""),
-                             band_glyph(name), tokens),
-                resolve_text(configured.get("about", ""),
-                             default.get("about", ""), tokens))
 
     def _band_config(self, severity: str) -> str:
         """What this band ran with — the two facts a reader needs on its page.
@@ -755,11 +765,15 @@ class WizCheck(Check):
             entries = (_id_entries(items, severity)
                        if self.aggregation_level == "id"
                        else [_issue_entry(issue, severity) for issue in items])
-            title, about = self._meta(severity)
             children.append(CheckResult(
                 code, entries, name=severity,
                 description=f"{severity.capitalize()} WIZ issues",
-                title=title, about=about,
+                # A band this check could name at construction is **declared**,
+                # and the library writes its label; what is left here is the band
+                # a run *discovered* — a severity WIZ invented — which nothing
+                # could have declared and which would otherwise wear no circle.
+                title=("" if severity in self.subnode_labels
+                       else band_glyph(severity)),
                 order=band_rank(severity),
                 config=self._band_config(severity)))
         return CheckResult(StatusCode.OK, children=tuple(children))

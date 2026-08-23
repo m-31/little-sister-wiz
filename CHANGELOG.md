@@ -11,48 +11,51 @@ the code says so.
 
 ## [Unreleased]
 
-## [0.1.1] - 2026-08-17
+## [0.1.2] - 2026-08-23
+
+### Changed
+
+- **Breaking: this package speaks check API epoch 2.** little-sister reads the
+  whole `subnodes:` block itself now, for every check type, and a type only
+  **declares** what it ships (its ADR-0025). So this check no longer parses that
+  block or layers its own defaults: it declares the band prose and the
+  `{entry_note}` token beside the band's glyph, and the library resolves and
+  applies them. **A deployment's configuration does not change** — the same
+  `subnodes:` entries, the same `{default}` extension, the same precedence under
+  `nodes.yaml` — and the block now works for every installed branch type rather
+  than for the ones that chose to read it. Installed beside an older library this
+  package refuses at startup, naming both epochs.
+- A band that appears **only in a run's findings** — a severity WIZ invents — is
+  the one whose glyph still rides its result, because nothing could have declared
+  a name that did not exist yet. A severity named by `severity_map` is declared
+  like the rest, prose or no prose, so it wears its circle and `{default}` in a
+  configured title still gives that circle back.
+
+### Fixed
+
+- **`little_sister_wiz.__version__` reports the installed version again.** It was a
+  literal, frozen at `0.1.0` since the first release, so an installation of 0.1.1
+  answered `0.1.0` to anything that asked — a second source of a fact `pyproject.toml`
+  already owns. It is read from the installed distribution's metadata now, the way
+  little-sister reads its own, so it cannot disagree with the package that carries it;
+  in a source tree with no install it reads `0+unknown` rather than a number that
+  would be wrong.
+
+### Requires
+
+- **`little-sister >= 0.3.13`**, up from 0.3.12: that is the release which reads the
+  `subnodes:` block for every check type, and therefore the first that speaks epoch 2.
+  Both reasons the floor already carried still hold — this package imports
+  `little_sister.transport` and `little_sister.fetch`, and the band glyphs depend on
+  the library knowing that a title with no word in it cannot stand in for a name.
+  Still a **floor, never a pin**.
+
+## [0.1.1] - 2026-08-16
 
 **Two behavior changes worth reading before you upgrade: `timeout:` now bounds the whole
 run rather than each request, and a WIZ outage now reports amber rather than red.**
 Neither needs a config edit; both change what you see
 ([ADR-0002](docs/adr/0002-a-read-failure-is-not-a-finding.md)).
-
-### Fixed
-
-- **An answer with no findings in it was reported as a clean tenant.** The issue list was
-  read defensively enough to survive a payload that was not there — a 200 with no
-  `data`, from a schema change or a partial response, became **zero issues**: every band
-  green, and a security tenant reported as all clear by a check that had been told
-  nothing. A missing payload is now a failure that grades and says so. An **empty** list
-  of issues is unchanged and still means what it says: nothing open.
-- **`timeout:` bounded nothing at all.** It is the check's one duration, and it was
-  handed to the socket layer as the *per-request* timeout — so a run, which is an auth
-  request plus up to three query attempts, could spend it several times over. Nothing
-  else bounded it either, so a slow WIZ could hold a run past its own `frequency:`
-  indefinitely, and a wedged check reports nothing at all. It is now the whole run's
-  deadline, and each request is clamped to what is left of it.
-  - **Re-read your `timeout:`** if you set it near one request's length. The shipped
-    example uses `120s`, which is now a ceiling on the whole run.
-- **The retry asked three times in the same millisecond, and skipped `500`.** There was
-  no wait between attempts — an endpoint that had just failed was asked again
-  immediately, which is the one thing certain not to help — and a plain 500, the
-  commonest transient status there is, was treated as final on the first ask while
-  502/503/504 were retried. There is a **1-second backoff** now, a 500 is retried like
-  any other 5xx, and a `429` is understood as *not now* and honors the `Retry-After` WIZ
-  sends. The wait is never longer than the run can afford: a ten-minute reset is reported
-  rather than slept through, because when to ask again is your `frequency:`.
-- **A transient failure on the auth endpoint ended the run.** The token exchange sat
-  outside the retry, so a single 503 from it lost a run that the next second would have
-  completed.
-- **Two failures reached the engine as a crash rather than a reading.** An auth response
-  without an `access_token`, and any answer that was not JSON, raised past this check's
-  own error handling — so little-sister reported the whole check as a check error instead
-  of saying what had happened.
-- **A misdirected endpoint could fail as something unrecognizable.** Redirects were
-  followed, and urllib turns a POST into a GET when it follows one, so the request body
-  was silently dropped. A 3xx is now reported as what it is: the URL is wrong, which for
-  a region-specific `api_url` is the useful thing to be told.
 
 ### Changed
 
@@ -77,6 +80,7 @@ Neither needs a config edit; both change what you see
     import.
   - **It is a default.** A tenant that wants the word back writes one `subnodes:`
     line, as for any band label.
+
 - **The band row reads worst-first.** It rendered
   `critical high informational low medium` — siblings sort by name, and a name sort
   destroys the one order a severity scale has, putting `informational`, the band that
@@ -93,6 +97,7 @@ Neither needs a config edit; both change what you see
   - **The JSON `children` order moves with it**, which little-sister ADR-0055
     decision 5 accepts as a small incompatible change: a client rendering in received
     order will see the row change, and what it sees is better.
+
 - **A band's page said what it was graded, and said it wrong.** Every band's shipped
   text named its own code in prose — `High-severity WIZ issues — graded ERROR`, and
   the same for the others — but that text is written into this package and cannot see
@@ -111,6 +116,7 @@ Neither needs a config edit; both change what you see
     so maintenance pins and dashboards are untouched. If your `subnodes:` block already
     rewrote a band's `about`, yours still wins and is unaffected — and if it repeated a
     grade in your own words, it has the same drift problem this fixes.
+
 - **A read failure is no longer a finding about your tenant.** *Could not ask WIZ* is a
   fact about WIZ, not about your cloud posture, so a 5xx, a throttle, a dropped
   connection or a spent budget now put the check's node at **WARN**, with a sentence
@@ -120,12 +126,54 @@ Neither needs a config edit; both change what you see
   - The severity bands are **not** rewritten on a failed run. They keep their previous
     reading and go stale on freshness, which is the honest display of the last thing
     actually known rather than five bands invented from an answer that never arrived.
+
 - **The request, the budgets and the retry are the library's now**, and only what is
   actually about WIZ stays here — the OAuth2 exchange, the GraphQL envelope and its own
   error channel. One visible effect: requests identify themselves as
   `little-sister/<version>` instead of an unversioned `little-sister-wiz`, which is a
   name a WIZ support thread can do something with. Certificate verification still cannot
   be switched off, now because the library offers no way to ask.
+
+### Fixed
+
+- **An answer with no findings in it was reported as a clean tenant.** The issue list was
+  read defensively enough to survive a payload that was not there — a 200 with no
+  `data`, from a schema change or a partial response, became **zero issues**: every band
+  green, and a security tenant reported as all clear by a check that had been told
+  nothing. A missing payload is now a failure that grades and says so. An **empty** list
+  of issues is unchanged and still means what it says: nothing open.
+
+- **`timeout:` bounded nothing at all.** It is the check's one duration, and it was
+  handed to the socket layer as the *per-request* timeout — so a run, which is an auth
+  request plus up to three query attempts, could spend it several times over. Nothing
+  else bounded it either, so a slow WIZ could hold a run past its own `frequency:`
+  indefinitely, and a wedged check reports nothing at all. It is now the whole run's
+  deadline, and each request is clamped to what is left of it.
+  - **Re-read your `timeout:`** if you set it near one request's length. The shipped
+    example uses `120s`, which is now a ceiling on the whole run.
+
+- **The retry asked three times in the same millisecond, and skipped `500`.** There was
+  no wait between attempts — an endpoint that had just failed was asked again
+  immediately, which is the one thing certain not to help — and a plain 500, the
+  commonest transient status there is, was treated as final on the first ask while
+  502/503/504 were retried. There is a **1-second backoff** now, a 500 is retried like
+  any other 5xx, and a `429` is understood as *not now* and honors the `Retry-After` WIZ
+  sends. The wait is never longer than the run can afford: a ten-minute reset is reported
+  rather than slept through, because when to ask again is your `frequency:`.
+
+- **A transient failure on the auth endpoint ended the run.** The token exchange sat
+  outside the retry, so a single 503 from it lost a run that the next second would have
+  completed.
+
+- **Two failures reached the engine as a crash rather than a reading.** An auth response
+  without an `access_token`, and any answer that was not JSON, raised past this check's
+  own error handling — so little-sister reported the whole check as a check error instead
+  of saying what had happened.
+
+- **A misdirected endpoint could fail as something unrecognizable.** Redirects were
+  followed, and urllib turns a POST into a GET when it follows one, so the request body
+  was silently dropped. A 3xx is now reported as what it is: the URL is wrong, which for
+  a region-specific `api_url` is the useful thing to be told.
 
 ### Requires
 
@@ -142,7 +190,7 @@ Neither needs a config edit; both change what you see
   Still a **floor, never a pin**, and the check API epoch is still **1**: adding names
   to the surface does not move it.
 
-## [0.1.0] - 2026-08-10
+## [0.1.0] - 2026-08-09
 
 ### Added
 

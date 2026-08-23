@@ -76,7 +76,8 @@ ignore_control_ids: []
 # 🔴 🟠 🟡 🔵 🟢, with ❓ for a severity this package does not name. Add a `subnodes:`
 # block only to change one: your text replaces the built-in default, or extends it
 # where you write {default} inside your text. Write a `title:` there to have the word
-# back.
+# back. little-sister reads this block itself, so an entry works the same way for
+# every branch check type you install, not only for this one.
 #
 # subnodes:
 #   critical:

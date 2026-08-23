@@ -271,34 +271,44 @@ def test_id_aggregation_is_the_default_and_is_in_the_config_summary():
     assert "**aggregation:** id level" in check.config_summary()
 
 
-def test_bands_carry_the_built_in_text(monkeypatch):
-    """The type ships every band's label, so a second tenant's config carries none."""
+def test_bands_declare_the_built_in_text(monkeypatch):
+    """The type ships every band's label, so a second tenant's config carries none.
+
+    Read off the check rather than off the result: since little-sister took the
+    `subnodes:` block (its ADR-0025) this package **declares**
+    these and the library resolves them — `subnode_labels` is that resolution, and
+    the engine writes it onto each band node. The `{entry_note}` token this package
+    declares beside the text has expanded by the time it lands there.
+    """
     check = _check()   # no subnodes configured
-    result = _run(check, FakeWiz([_issue("CRITICAL")]), monkeypatch)
+    _run(check, FakeWiz([_issue("CRITICAL")]), monkeypatch)
+    assert check.subnode_labels["critical"] == {
+        "title": band_glyph("critical"), "about": _about("critical")}
+    assert check.subnode_labels["high"]["title"] == "🟠"
+
+
+def test_a_declared_band_hands_over_no_label_of_its_own(monkeypatch):
+    """The other half, where it can fail. A result carrying a band's glyph would
+    be shadowed by the resolved label anyway — and would go on looking right in a
+    test while a deployment's override was the thing actually painting."""
+    result = _run(_check(), FakeWiz([_issue("CRITICAL")]), monkeypatch)
     critical = next(c for c in result.children if c.name == "critical")
-    assert critical.title == band_glyph("critical")
-    assert critical.about == _about("critical")
-    high = next(c for c in result.children if c.name == "high")
-    assert high.title == "🟠"
+    assert (critical.title, critical.about) == ("", "")
 
 
-def test_config_replaces_a_band_label(monkeypatch):
-    check = _check(subnodes={
+def test_config_replaces_a_band_label():
+    check = _check(subnode_labels={
         "critical": {"title": "Sev-1", "about": "Page the on-call."}})
-    result = _run(check, FakeWiz([_issue("CRITICAL")]), monkeypatch)
-    critical = next(c for c in result.children if c.name == "critical")
-    assert critical.title == "Sev-1"
-    assert critical.about == "Page the on-call."
-    high = next(c for c in result.children if c.name == "high")   # untouched
-    assert high.about == _about("high")
+    assert check.subnode_labels["critical"] == {
+        "title": "Sev-1", "about": "Page the on-call."}
+    assert check.subnode_labels["high"]["about"] == _about("high")   # untouched
 
 
-def test_config_extends_a_band_label_with_the_default_token(monkeypatch):
-    check = _check(subnodes={
+def test_config_extends_a_band_label_with_the_default_token():
+    check = _check(subnode_labels={
         "critical": {"about": "{default} Page the on-call."}})
-    result = _run(check, FakeWiz([_issue("CRITICAL")]), monkeypatch)
-    critical = next(c for c in result.children if c.name == "critical")
-    assert critical.about == _about("critical") + " Page the on-call."
+    assert check.subnode_labels["critical"]["about"] == (
+        _about("critical") + " Page the on-call.")
 
 
 def _row(children):
@@ -314,11 +324,12 @@ def _row(children):
 def test_every_declared_band_wears_its_own_colour(monkeypatch):
     """The row the operator sees. Worst-first by rank, and the colour says *how bad
     this is* — the same circle for the same severity, always."""
-    result = _run(_check(), FakeWiz([_issue(s) for s in
-                                     ("CRITICAL", "HIGH", "MEDIUM", "LOW",
-                                      "INFORMATIONAL")]), monkeypatch)
+    check = _check()
+    result = _run(check, FakeWiz([_issue(s) for s in
+                                  ("CRITICAL", "HIGH", "MEDIUM", "LOW",
+                                   "INFORMATIONAL")]), monkeypatch)
     row = sorted(result.children, key=lambda c: (c.order, c.name))
-    assert [(c.name, c.title) for c in row] == [
+    assert [(c.name, check.subnode_labels[c.name]["title"]) for c in row] == [
         ("critical", "🔴"), ("high", "🟠"), ("medium", "🟡"),
         ("low", "🔵"), ("informational", "🟢")]
 
@@ -361,13 +372,24 @@ def test_a_severity_this_package_does_not_name_gets_a_question_mark(monkeypatch)
     assert band.title not in BAND_GLYPHS.values()
 
 
+def test_a_band_named_only_by_the_severity_map_declares_its_circle():
+    """A `severity_map` may name a severity this package writes no prose for. It
+    still gets a declaration — the glyph — so the band is labelled rather than
+    bare, and a deployment writing `{default}` into a title for it gets that
+    circle back rather than nothing."""
+    check = _check(severity_map={"catastrophic": StatusCode.ERROR})
+    assert check.subnode_labels["catastrophic"] == {"title": "❓"}
+    extended = _check(severity_map={"catastrophic": StatusCode.ERROR},
+                      subnode_labels={"catastrophic": {"title": "{default}!"}})
+    assert extended.subnode_labels["catastrophic"]["title"] == "❓!"
+
+
 def test_a_deployment_still_overrules_a_band_title(monkeypatch):
     """Whatever this package picks is a default (little-sister ADR-0025). A tenant
     that wants the word back, or a different mark, writes one line."""
-    check = _check(subnodes={"critical": {"title": "Sev-1"}})
-    result = _run(check, FakeWiz([_issue("CRITICAL")]), monkeypatch)
-    critical = next(c for c in result.children if c.name == "critical")
-    assert critical.title == "Sev-1"
+    check = _check(subnode_labels={"critical": {"title": "Sev-1"}})
+    _run(check, FakeWiz([_issue("CRITICAL")]), monkeypatch)
+    assert check.subnode_labels["critical"]["title"] == "Sev-1"
 
 
 def test_the_glyph_does_not_fold_away_against_the_name(monkeypatch):
@@ -377,10 +399,12 @@ def test_the_glyph_does_not_fold_away_against_the_name(monkeypatch):
     (little-sister ADR-0061), so the word is never lost."""
     from little_sister.titles import label_parts, shown_title
 
-    result = _run(_check(), FakeWiz([_issue("CRITICAL")]), monkeypatch)
+    check = _check()
+    result = _run(check, FakeWiz([_issue("CRITICAL")]), monkeypatch)
     critical = next(c for c in result.children if c.name == "critical")
-    assert shown_title(critical.name, critical.title) == "🔴"
-    assert label_parts(critical.name, critical.title) == ("critical", "🔴")
+    title = check.subnode_labels[critical.name]["title"]
+    assert shown_title(critical.name, title) == "🔴"
+    assert label_parts(critical.name, title) == ("critical", "🔴")
 
 
 def test_the_band_row_reads_worst_first_rather_than_alphabetically(monkeypatch):
@@ -511,7 +535,7 @@ def test_entity_level_lines_are_members_keyed_by_the_wiz_issue_id(monkeypatch):
     result = _run(check, fake, monkeypatch)
     critical = next(c for c in result.children if c.name == "critical")
     assert critical.members
-    assert "Each line is one WIZ issue" in critical.about
+    assert "Each line is one WIZ issue" in check.subnode_labels["critical"]["about"]
     assert [e.slug for e in critical.reason_entries] == ["wiz-abc-123",
                                                          "wiz-def-456"]
 
@@ -526,7 +550,8 @@ def test_default_id_level_groups_entities_by_control_id(monkeypatch):
     result = _run(check, fake, monkeypatch)
     critical = next(c for c in result.children if c.name == "critical")
 
-    assert "Each line is one WIZ **control**" in critical.about
+    assert ("Each line is one WIZ **control**"
+            in check.subnode_labels["critical"]["about"])
     assert [entry.slug for entry in critical.reason_entries] == [
         "wiz-control-wc-1", "wiz-control-wc-2"]
     first = critical.reason_texts[0]

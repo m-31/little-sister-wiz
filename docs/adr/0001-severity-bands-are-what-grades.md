@@ -1,7 +1,7 @@
 # ADR-0001 — A tenant's issues are graded as severity bands
 
 - **Status:** Accepted
-- **Date:** 2026-08-14 — the decisions are the port's and are already in the code;
+- **Date:** 2026-08-15 — the decisions are the port's and are already in the code;
   this record is where they are written down for the people who receive it
 - **Related:** little-sister **ADR-0036** (addressable members — what makes a band's
   line separately pinnable), little-sister **ADR-0050** (a slug is an identifier,

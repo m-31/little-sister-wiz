@@ -11,7 +11,7 @@ band keeps reporting.
 
 ## The contract
 
-- **Requires** `little-sister >= 0.3.12` — a floor, never a pin.
+- **Requires** `little-sister >= 0.3.13` — a floor, never a pin.
 - **Runs on** Python **3.11 or newer** — the library's floor, not a higher
   one of its own.
 - **Registers** one check type: **`wiz`**.
@@ -24,7 +24,7 @@ band keeps reporting.
 # Pin them. A deployment names exact versions so an upgrade is a deliberate edit
 # rather than drift; a plugin is the one that declares a floor, because two plugins
 # that each pinned could not be installed together.
-dependencies = ["little-sister==0.3.12", "little-sister-wiz==0.1.0"]
+dependencies = ["little-sister==0.3.13", "little-sister-wiz==0.1.0"]
 ```
 
 ```python
