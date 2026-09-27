@@ -11,7 +11,7 @@ band keeps reporting.
 
 ## The contract
 
-- **Requires** `little-sister >= 0.3.13` — a floor, never a pin.
+- **Requires** `little-sister >= 0.3.18` — a floor, never a pin.
 - **Runs on** Python **3.11 or newer** — the library's floor, not a higher
   one of its own.
 - **Registers** one check type: **`wiz`**.
@@ -24,14 +24,14 @@ band keeps reporting.
 # Pin them. A deployment names exact versions so an upgrade is a deliberate edit
 # rather than drift; a plugin is the one that declares a floor, because two plugins
 # that each pinned could not be installed together.
-dependencies = ["little-sister==0.3.13", "little-sister-wiz==0.1.0"]
+dependencies = ["little-sister==0.3.18", "little-sister-wiz==0.1.3"]
 ```
 
 ```python
-# wsgi.py — registrations first, the app last. The order is load-bearing:
-# importing little_sister.app builds the engine and loads the check configs, so
-# every check type must already be registered. `isort: off` keeps an import
-# sorter from quietly reversing that.
+# wsgi.py — registrations first, the app last. The order is load-bearing: the
+# server's start, right after little_sister.app is imported, builds the engine from
+# the check configs, so every check type must already be registered. `isort: off`
+# keeps an import sorter from quietly reversing that.
 # isort: off
 import little_sister_wiz               # noqa: F401  registers the `wiz` type
 from little_sister.app import app
@@ -71,23 +71,41 @@ One OAuth2 client-credentials token exchange, then one GraphQL query per run:
 | | |
 |---|---|
 | **Token** | `POST https://auth.app.wiz.io/oauth/token` (`token_url:` overrides it) |
-| **Issues** | `POST <api_url>` — `issues(first: <first>)`, status `OPEN` and `IN_PROGRESS`, ordered by severity |
+| **Issues** | `POST <api_url>` — `issuesV2(first: <first>)`, status `OPEN` and `IN_PROGRESS`, type `TOXIC_COMBINATION` and `CLOUD_CONFIGURATION`, ordered by severity |
 
-Each returned issue carries its id, severity, status, control (`id`, `name`) and
-affected entity (`name`, `type`) — nothing else is requested.
+Each returned issue carries its id, severity and status, the rules that raised it — a
+Control's `id` and `name`, or a configuration rule's parent control — and the affected
+entity (`name`, `type`); nothing else is requested. The issues a Control or a
+configuration rule raised are read; a threat detection (`THREAT_DETECTION`, which a Wiz
+Defend license brings) is not
+([ADR-0004](docs/adr/0004-the-issues-are-asked-of-issuesv2.md)).
 
 | Config | Decides |
 |---|---|
 | `severity_map` | what a band with findings grades as. Defaults: `critical` / `high` / `medium` → **ERROR**, `low` → **WARN**, `informational` → **OK**. An empty band is always OK |
-| `aggregation_level` | `id` (default) — one line per WIZ **control**, listing every affected entity, slugged `wiz-control-<control-id>`; `entity` — one line per issue, slugged `wiz-<issue-id>` |
+| `aggregation_level` | `id` (default) — one line per WIZ **control**, listing every affected entity, slugged `wiz-control-<control-id>`: a configuration rule's issue under the rule's parent control, and an issue whose rules name several controls under the one with the smallest id; `entity` — one line per issue, slugged `wiz-<issue-id>` |
 | `ignore_control_ids` | WIZ control IDs to skip entirely |
-| `first` | issues fetched per run — a single page, so raise it rather than expecting pagination |
+| `first` | issues fetched per run, from 1 to 1000 — WIZ's limit for one query — and 500 by default. A single page, so raise it rather than expecting pagination; a value outside 1 to 1000 refuses to load |
 
 A band with findings takes its mapped status; the check's own node rolls up
 worst-of its bands. An issue with no id falls back to little-sister's content hash
 for its slug, never to a position in the list. The package has no dependency but
 little-sister itself, and TLS verification is always on — there is no setting to
 turn it off.
+
+## What a run records
+
+Each run records what it read: one reading of the tenant's **exposure** — how many open
+issues each band holds, counted before `ignore_control_ids`, and whether the page was
+full — and then one reading per issue. Every line made from one issue carries that
+issue's record as its `data` (every line at `aggregation_level: entity`; a control's
+line at `id` only when one issue made it), so a line template or a client can read what
+the line read.
+
+`series_keep:` — little-sister's setting, **0 by default** — keeps the exposure's
+history: one record each time a band's count changes, or the read starts or stops
+failing, the oldest out. Issues keep none. Why it is shaped this way is
+[ADR-0003](docs/adr/0003-a-run-is-the-exposure-and-its-issues.md).
 
 ## When WIZ is the one having a bad day
 
@@ -125,26 +143,29 @@ value chosen for one request now bounds the whole run. The shipped example uses 
 ## Develop
 
 little-sister is declared as a **floor** — the release that promised the surface
-this package imports — and it resolves **from the index**, like any other
-dependency. There is no `[tool.uv.sources]` table here, and the committed
-`uv.lock` is what a release runs against. To work against a local library
-checkout, add the redirect and **do not commit it**: uv reads the sources table of
-a dependency it resolves from a path or a checkout, so a committed line would
-follow this package into every deployment that installs it.
+this package imports — and a release resolves it **from the index**, like any
+other dependency: a released tree carries no `[tool.uv.sources]` table, and its
+`uv.lock` names the index. Working against a library that is not on the index yet
+takes a redirect to the checkout beside this one:
 
 ```toml
-# pyproject.toml — locally, never committed
+# pyproject.toml — while the library is unreleased, and never in a release
 [tool.uv.sources]
-little-sister = { git = "file:///path/to/little-sister" }
+little-sister = { path = "../little-sister", editable = true }
 ```
 
-Restore `uv.lock` with it. The next `uv run` — the pre-commit gate is one — rewrites
-the lock to `source = { directory = … }`, so a redirect kept out of `pyproject.toml`
-can still reach a commit through the lock beside it.
+The redirect leaves a second trace by itself — the next `uv run`, and the pre-commit
+gate is one, rewrites `uv.lock` to name the directory — and the two go together:
+while the library is unreleased both may be committed, and neither may reach a
+release. uv reads the sources table of a dependency it resolves from a path or a
+checkout, so a released one would be imposed on every deployment that installs this
+package that way; an install from the index is unaffected. The comment on the sources
+table in `pyproject.toml` says what the window costs.
 
 ```bash
 uv sync
 uv run ruff check
+uv run shellcheck $(git ls-files -- '*.sh' 'hooks/pre-commit')
 uv run mypy
 uv run mypy --python-version 3.11   # against the floor, not the interpreter you have
 uv run pytest -q

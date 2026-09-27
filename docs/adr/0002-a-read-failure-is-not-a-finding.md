@@ -1,7 +1,7 @@
 # ADR-0002 — A read failure is not a finding about the tenant
 
 - **Status:** Accepted
-- **Date:** 2026-08-15
+- **Date:** 2026-09-27 (accepted 2026-08-15)
 - **Related:** [ADR-0001](0001-severity-bands-are-what-grades.md) (the band is what
   grades — this record is what happens when there is no band to grade),
   little-sister **ADR-0058** (one transport policy for the family, and any client —
@@ -34,7 +34,7 @@ is that the one seam the tests never crossed was the only place they lived.
 **per-request** timeout, so an auth request plus up to three query attempts each got
 the whole of it — a 30-second budget could spend two minutes, and the example config's
 `timeout: 120s` could spend eight. Nothing else bounded it either: the engine calls
-`run()` with no deadline of its own, on the stated understanding that honouring
+`run()` with no deadline of its own, on the stated understanding that honoring
 `timeout:` is the check's job. A slow WIZ could hold a run past its own `frequency:`
 indefinitely, and a wedged check reports **nothing at all**, which is worse than any
 reading it could have produced.
@@ -45,7 +45,7 @@ transient status
 The loop was `for _ in range(3)` with `continue` on 502/503/504 and **no wait between
 attempts** — an endpoint that had just failed was asked again immediately, which is the
 one thing certain not to help. A plain **500** was not retried at all; a `429` was not
-recognised; and the sentence at the end of the loop was
+recognized; and the sentence at the end of the loop was
 `WIZ query failed after retries (5xx)`, which threw away the status and the body it had
 just been handed three times. The token exchange sat outside the loop entirely, so one
 503 from the auth endpoint ended a run that the next second would have completed.
@@ -122,9 +122,13 @@ sister package has to read GitHub's headers to tell a throttled 403 from a permi
 403; here there is nothing to disambiguate, because this check holds **one credential
 for a whole tenant** — a refusal means the client ID or secret is wrong, and no amount
 of asking again will make it right. So the **standard `Retry-After` is the whole of
-what is read**. A WIZ-specific header set nobody here has verified is not something to
-invent: guessing a dialect is worse than not reading one, because a wrong guess waits
-the wrong length of time and looks like it worked.
+what is read**. A WIZ-specific header set is not something to invent: guessing a
+dialect is worse than not reading one, because a wrong guess waits the wrong length of
+time and looks like it worked. WIZ's own *Quotas & Limits* page stands behind this: the
+API "adheres to the official specification for Retry-After", a throttle is a `429`
+whose headers say when to ask again, and the body beside them — where a
+`RATE_LIMIT_EXCEEDED` code sits — may change and is not to be relied on. So the body
+and the `x-ratelimit-*` headers that page shows stay unread.
 
 ### 4. Only a transient failure is retried, and the wait is bounded by the run
 
@@ -165,6 +169,12 @@ The distinction §3 of the Context lost. `data.issues` must be an object and its
 must be a list; anything else is `MALFORMED` and grades. An empty list stays what it has
 always been — a tenant with nothing open, which is a real and common answer and the one
 this check exists to be able to give.
+
+**No data is read from an answer that carries errors.** WIZ's Python SDK documents that a
+GraphQL error may arrive beside partial data, which the SDK hands over with a warning
+unless told to raise. Part of a tenant graded as the whole of it would be the
+green-when-blind this decision exists to refuse, one level down, so such an answer is
+the `ANSWERED` row of §3 and nothing of its data is graded.
 
 ### 7. Redirects are not followed
 

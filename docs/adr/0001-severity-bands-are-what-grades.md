@@ -1,12 +1,14 @@
 # ADR-0001 — A tenant's issues are graded as severity bands
 
 - **Status:** Accepted
-- **Date:** 2026-08-15 — the decisions are the port's and are already in the code;
+- **Date:** 2026-09-27 (accepted 2026-08-15) — the decisions are the port's and are already in the code;
   this record is where they are written down for the people who receive it
 - **Related:** little-sister **ADR-0036** (addressable members — what makes a band's
   line separately pinnable), little-sister **ADR-0050** (a slug is an identifier,
   never a position), little-sister **ADR-0025** (per-node display text, and a
-  deployment's right to replace it), little-sister **ADR-0023** (secret references)
+  deployment's right to replace it), little-sister **ADR-0023** (secret references),
+  [ADR-0004](0004-the-issues-are-asked-of-issuesv2.md) (the query the issues are asked
+  of, and the control an issue's rules name)
 
 > Every reference to one of little-sister's records is written out as **little-sister
 > ADR-00NN**, because the two numbering spaces overlap.
@@ -77,10 +79,15 @@ different order, which it may do at any time. An issue that arrives with no id h
 nothing stable to key on and falls back to little-sister's content hash — a worse
 identity, and still not a position.
 
+The issues are asked of WIZ's `issuesV2`
+([ADR-0004](0004-the-issues-are-asked-of-issuesv2.md)), and the control is the one an
+issue's rules name — a `Control`'s own id, or a configuration rule's parent control's
+id.
+
 ### 4. An issue with no control ID gets its own bucket
 
-Under `aggregation_level: id`, issues are grouped by control. An issue whose control has
-no id is **not** merged with the others that lack one. Sharing an empty-string bucket
+Under `aggregation_level: id`, issues are grouped by control. An issue whose rules name
+no control is **not** merged with the others that lack one. Sharing an empty-string bucket
 would put unrelated findings on a single line and, worse, move a maintenance pin made
 for one of them onto work it was never made for.
 
@@ -102,7 +109,7 @@ first run that happens to matter. Required-with-no-default moves that failure to
 check that is quietly never green.
 
 It is also the one value here that names a tenant, which is the type-vs-deployment line
-arriving from the direction that proves it: it could not have travelled with the package
+arriving from the direction that proves it: it could not have traveled with the package
 even if we had wanted a default.
 
 ### 7. `IN_PROGRESS` is a finding, not a hidden state
@@ -118,7 +125,8 @@ about the tenant's exposure, which has not changed.
 ### 8. One page, and the cap is a ceiling rather than an error
 
 A run fetches a single page of `first` issues (default 500), ordered by severity
-descending. Beyond that, findings are silently not seen.
+descending. Beyond that, findings are silently not seen. `first` has WIZ's own bounds,
+1 to 1000, and a value outside them refuses to load.
 
 This is stated rather than defended: it matches the original, no tenant here approaches
 it, and pagination is real work for a bound nobody has hit. What makes it tolerable is
@@ -139,8 +147,10 @@ the answer until it is not.
   what makes it safe to improve a line's text at any time.
 - **What a band renders as is not settled here.** The order the bands appear in, and
   whether a band's title should carry its severity as a glyph, are display questions this
-  record deliberately does not answer — they depend on a library change that does not
-  exist yet.
-- **The provenance of the port** — where each piece came from, what travelled and what
+  record deliberately does not answer. The library has since given a check both —
+  a rank per subnode (little-sister ADR-0055) and a glyph beside a title
+  (little-sister ADR-0061) — and this package ships them, as the CHANGELOG says; the
+  grading here is untouched by either.
+- **The provenance of the port** — where each piece came from, what traveled and what
   stayed behind — is a working note and stays on the working branch. What a consumer
   needs is the reasoning, which is this file.

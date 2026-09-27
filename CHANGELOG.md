@@ -11,13 +11,76 @@ the code says so.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-27
+
+**Breaking: this package speaks check API epoch 3, and needs the little-sister release
+that does.** Beside an older library it refuses at startup, naming both epochs, so a
+deployment moves both pins together. It asks WIZ's documented `issuesV2` query now, in
+place of the `issues` query WIZ superseded, and reads the same issues. **One
+configuration may have to change**: `first` refuses to load outside 1 to 1000, the range
+that query takes. No slug moves, and the tree says what it said but for the cases under
+*Changed* and *Fixed*.
+
+### Added
+
+- **A run records what it read**
+  ([ADR-0003](docs/adr/0003-a-run-is-the-exposure-and-its-issues.md)): one reading of
+  the tenant's exposure — the open issues per severity band, counted before
+  `ignore_control_ids`, and whether the page was full — and then one reading per issue.
+  With little-sister's `series_keep:` set, the check keeps the exposure's history, one
+  record per change; issues keep none.
+- **Every line made from one issue carries that issue's record** as its `data` — every
+  line at `aggregation_level: entity`, a control's line at `id` only when one issue made
+  it — so a line template or a client can read what the line read. It is weight in every
+  envelope a client polls: about 150 KB per poll for five hundred open issues at
+  `entity`.
+
+### Changed
+
+- **Breaking: check API epoch 3.** little-sister replaced a check's `run()` with
+  `measure()` and `grade()` (little-sister ADR-0086), and this type is written as the two
+  halves now.
+- **The node the check owns is a container**: it declares nothing and rolls up its
+  bands, where it declared `OK`. What it rolls up to is unchanged but for one case — with
+  every band in maintenance it reads `MAINTENANCE`, where it read `OK`.
+- **A name past 300 characters, or past 600 bytes as JSON writes it — which emoji reach
+  far sooner — is shortened once**, and its line says the shortened name. So is a failure
+  sentence past the same length, such as a GraphQL error quoted whole.
+- **The check asks WIZ's `issuesV2`**, the query WIZ documents, in place of `issues`,
+  which WIZ superseded in 2023 and no longer documents
+  ([ADR-0004](docs/adr/0004-the-issues-are-asked-of-issuesv2.md)). It reads the same
+  issues — those a Control or a configuration rule raised, types `TOXIC_COMBINATION` and
+  `CLOUD_CONFIGURATION` — and still no threat detection. A line is keyed by the control
+  the issue's rules name, a configuration rule's issue by the rule's parent control, so
+  no slug moves; an issue whose rules name several controls goes under the one with the
+  smallest id.
+- **Breaking for a `first` outside 1 to 1000: it must be an integer from 1 to 1000**,
+  the most issues one `issuesV2` query may ask for, and a configuration outside that
+  refuses to load with a sentence naming the range, rather than asking WIZ on every run
+  for what its documented query does not take. A value that is not an integer is refused
+  the same way; it used to stop the load with a bare `ValueError`, naming neither the
+  file nor the key.
+
+### Fixed
+
+- **An issue on an object deleted since it was raised still names what it was raised
+  on**, where its line used to name nothing but *WIZ issue* and an id. The entity comes
+  from `entitySnapshot` now, which keeps what the issue was raised on after the object is
+  gone, where the old query read the object as it is now; the few lines this changes are
+  such issues.
+
+### Requires
+
+- **`little-sister >= 0.3.18`**, up from 0.3.13: the first release that speaks check API
+  epoch 3. Still a **floor, never a pin**.
+
 ## [0.1.2] - 2026-08-23
 
 ### Changed
 
 - **Breaking: this package speaks check API epoch 2.** little-sister reads the
   whole `subnodes:` block itself now, for every check type, and a type only
-  **declares** what it ships (its ADR-0025). So this check no longer parses that
+  **declares** what it ships (little-sister ADR-0025). So this check no longer parses that
   block or layers its own defaults: it declares the band prose and the
   `{entry_note}` token beside the band's glyph, and the library resolves and
   applies them. **A deployment's configuration does not change** — the same
@@ -64,13 +127,13 @@ Neither needs a config edit; both change what you see
   letter, twice the width of a chip for no second fact. The row now reads
   🔴 🟠 🟡 🔵 🟢, beside the names, which is the severity at a glance in one
   character.
-  - **The colour is by name, never by rank.** Same severity, same circle, wherever
-    it sits — a colour that meant *where this band is in this row* would move when a
+  - **The color is by name, never by rank.** Same severity, same circle, wherever
+    it sits — a color that meant *where this band is in this row* would move when a
     deployment changed the row, and nobody reads a red circle that way.
   - **`informational` is green, not white.** The bottom of a severity scale and
     *nothing to do here, and that is the thing being watched* are different
     statements, and this band renders while empty precisely to make the second one.
-  - **A severity this package does not name gets `❓`**, never a borrowed colour. The
+  - **A severity this package does not name gets `❓`**, never a borrowed color. The
     band list is open: WIZ may add one, and your `severity_map` may name one.
   - **The word is not lost anywhere.** The name sits beside the title on every chip,
     and the two surfaces that draw a title *instead of* a name — the `/copy` hand-off

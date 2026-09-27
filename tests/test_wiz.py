@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import re
+from datetime import UTC, datetime
 from email.message import Message
 from unittest import mock
 
 import pytest
 from little_sister import fetch as ls_fetch
 from little_sister.checks import CheckError
-from little_sister.status import StatusCode
+from little_sister.status import StatusCode, effective_code
 from little_sister.transport import Deadline, DeadlineExceeded, Fault
+from running import measured, run_check
 
 from little_sister_wiz import wiz as mod_wiz
 from little_sister_wiz.wiz import (
@@ -18,9 +22,11 @@ from little_sister_wiz.wiz import (
     RETRY_BACKOFF_SECONDS,
     SEVERITY_ORDER,
     SUBNODES,
+    IssuePage,
     WizCheck,
     WizClient,
     WizError,
+    _estate_subject,
     band_glyph,
     band_rank,
 )
@@ -46,23 +52,26 @@ def _about(band):
 
 
 class FakeWiz:
-    """Stands in for WizClient.issues()."""
+    """Stands in for WizClient.issues() — one page, and whether WIZ holds more."""
 
-    def __init__(self, issues=None, error=None):
+    def __init__(self, issues=None, error=None, more=False):
         self._issues = issues or []
         self._error = error
+        self._more = more
 
     def issues(self, first):
         if self._error:
             raise self._error
-        return self._issues
+        return IssuePage(nodes=self._issues, more=self._more)
 
 
 def _issue(sev, control_id="wc-1", name="Public bucket", entity="bucket-a",
            issue_id="i1"):
+    """One issue in the shape WIZ's *Get Risk Issues* page documents: the Control
+    that raised it among its `sourceRules`, and the affected `entitySnapshot`."""
     return {"id": issue_id, "severity": sev, "status": "OPEN",
-            "control": {"id": control_id, "name": name},
-            "entity": {"name": entity, "type": "BUCKET"}}
+            "sourceRules": [{"__typename": "Control", "id": control_id, "name": name}],
+            "entitySnapshot": {"name": entity, "type": "BUCKET"}}
 
 
 def _check(**over):
@@ -73,10 +82,19 @@ def _check(**over):
     return WizCheck(**cfg)
 
 
-def _run(check, fake, monkeypatch):
+def _readings(check, fake, monkeypatch):
+    """What one ``measure()`` hands back against ``fake``."""
     monkeypatch.setattr(check, "_make_client",
                         lambda cid, sec, deadline=None: fake)
-    return check.run()
+    return measured(check)
+
+
+def _run(check, fake, monkeypatch):
+    """Both halves against ``fake``, the way the engine runs them
+    (little-sister ADR-0086)."""
+    monkeypatch.setattr(check, "_make_client",
+                        lambda cid, sec, deadline=None: fake)
+    return run_check(check)
 
 
 @pytest.fixture(autouse=True)
@@ -204,9 +222,9 @@ def test_an_unreadable_answer_still_errors(monkeypatch):
 
 
 def test_the_runs_budget_is_a_reading_and_not_a_traceback(monkeypatch):
-    """`DeadlineExceeded` is deliberately not a `WizError`, so `run()` needs its own
-    catch — without it the engine turns the whole check into an all-or-nothing check
-    error (little-sister ADR-0040) instead of saying the run ran out of time."""
+    """`DeadlineExceeded` is deliberately not a `WizError`, so `measure()` needs its
+    own catch — without it the engine turns the whole check into an all-or-nothing
+    check error (little-sister ADR-0040) instead of saying the run ran out of time."""
     check = _check()
     fake = FakeWiz(error=DeadlineExceeded(
         "the run's budget of 30s ran out after 30.0s"))
@@ -228,7 +246,7 @@ def test_the_run_builds_its_deadline_from_the_configured_timeout(monkeypatch):
 
     check = _check(timeout_seconds=42.0)
     monkeypatch.setattr(check, "_make_client", _capture)
-    check.run()
+    check.measure()
     assert isinstance(seen["deadline"], Deadline)
     assert seen["deadline"].seconds == 42.0
 
@@ -263,6 +281,41 @@ def test_config_loads_via_loader(tmp_path):
 def test_invalid_aggregation_level_is_a_config_error(value):
     with pytest.raises(CheckError, match=r"aggregation_level.*id.*entity"):
         _check(aggregation_level=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, 1001, 5000, "many", "", True, 2.5, None])
+def test_a_first_wiz_would_refuse_is_refused_at_load(value):
+    """ADR-0004 decision 5: WIZ's page takes `first` from 1 to 1000, so the check
+    refuses anything else once, at load, and names the range."""
+    with pytest.raises(CheckError,
+                       match=r"^wiz 'first' must be an integer from 1 to 1000,"):
+        _check(first=value)
+
+
+@pytest.mark.parametrize(("value", "first"),
+                         [(1, 1), (500, 500), (1000, 1000), ("250", 250)])
+def test_a_first_wiz_takes_loads(value, first):
+    assert _check(first=value).first == first
+
+
+@pytest.mark.parametrize("value", ["1001", "many"])
+def test_the_loader_refuses_a_first_wiz_would_refuse_and_names_the_file(
+        tmp_path, value):
+    """Through the loader too — where a value that was not an integer used to escape
+    as a bare `ValueError`, naming neither the file nor the key."""
+    from little_sister.checks import load_checks
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "wiz.yaml").write_text(
+        "type: wiz\n"
+        "secrets:\n"
+        "  client_id: env://WIZ_CLIENT_ID\n"
+        "  client_secret: env://WIZ_CLIENT_SECRET\n"
+        "path: /wiz\n"
+        "api_url: https://api.example.app.wiz.io/graphql\n"
+        f"first: {value}\n")
+    with pytest.raises(CheckError, match=r"^wiz\.yaml: wiz 'first' must be an "
+                                         r"integer from 1 to 1000,"):
+        load_checks(str(tmp_path))
 
 
 def test_id_aggregation_is_the_default_and_is_in_the_config_summary():
@@ -322,7 +375,7 @@ def _row(children):
 
 
 def test_every_declared_band_wears_its_own_colour(monkeypatch):
-    """The row the operator sees. Worst-first by rank, and the colour says *how bad
+    """The row the operator sees. Worst-first by rank, and the color says *how bad
     this is* — the same circle for the same severity, always."""
     check = _check()
     result = _run(check, FakeWiz([_issue(s) for s in
@@ -336,13 +389,13 @@ def test_every_declared_band_wears_its_own_colour(monkeypatch):
 
 def test_a_bands_colour_does_not_move_when_its_rank_does(monkeypatch):
     """The decision, and the sister package is why. Ranking the ramp would make a
-    colour mean *where this band sits in this row* rather than *how bad this is* —
+    color mean *where this band sits in this row* rather than *how bad this is* —
     over there a deployment configures which severities are watched, so one `high` is
     rank 1 in one aspect and rank 2 in the next, and would wear a different circle in
     each on one dashboard.
 
     This check has no such knob, so the claim is made the only way it can be: move
-    the declared order underneath and watch the ranks follow while the colours stay
+    the declared order underneath and watch the ranks follow while the colors stay
     exactly where they were."""
     before = {s: band_glyph(s) for s in SEVERITY_ORDER}
     assert band_rank('critical') == 1 and band_rank('low') == 4
@@ -351,7 +404,7 @@ def test_a_bands_colour_does_not_move_when_its_rank_does(monkeypatch):
                         ('low', 'informational', 'critical', 'medium', 'high'))
 
     assert band_rank('low') == 1 and band_rank('critical') == 3   # ranks moved
-    assert {s: band_glyph(s) for s in before} == before           # colours did not
+    assert {s: band_glyph(s) for s in before} == before           # colors did not
     assert band_glyph('low') == '🔵'   # emphatically not the 🔴 its new rank would give
 
 
@@ -365,7 +418,7 @@ def test_informational_is_green_and_not_the_bottom_of_the_ramp():
 
 def test_a_severity_this_package_does_not_name_gets_a_question_mark(monkeypatch):
     """The band list is open — WIZ may add a severity tomorrow, and a `severity_map`
-    may name one we have never heard of. A band with no colour must not borrow one."""
+    may name one we have never heard of. A band with no color must not borrow one."""
     result = _run(_check(), FakeWiz([_issue("BIZARRE")]), monkeypatch)
     band = next(c for c in result.children if c.name == "bizarre")
     assert band.title == "❓"
@@ -374,7 +427,7 @@ def test_a_severity_this_package_does_not_name_gets_a_question_mark(monkeypatch)
 
 def test_a_band_named_only_by_the_severity_map_declares_its_circle():
     """A `severity_map` may name a severity this package writes no prose for. It
-    still gets a declaration — the glyph — so the band is labelled rather than
+    still gets a declaration — the glyph — so the band is labeled rather than
     bare, and a deployment writing `{default}` into a title for it gets that
     circle back rather than nothing."""
     check = _check(severity_map={"catastrophic": StatusCode.ERROR})
@@ -445,7 +498,7 @@ def test_undeclared_severities_sort_by_name_among_themselves(monkeypatch):
 
 
 def test_every_declared_band_carries_the_rank_its_constant_states():
-    """One source. The glyph item will read these same numbers, and deriving a colour
+    """One source. The glyph item will read these same numbers, and deriving a color
     ramp separately from the sequence is how a row ends up reading amber above red."""
     assert [band_rank(s) for s in SEVERITY_ORDER] == [1, 2, 3, 4, 5]
     assert band_rank("something-wiz-invents") == len(SEVERITY_ORDER) + 1
@@ -638,9 +691,12 @@ def test_an_in_progress_issue_says_so(monkeypatch):
     assert critical.reason_texts[0].endswith("*in progress*")
 
 
-def test_an_issue_without_an_entity_still_reads(monkeypatch):
+@pytest.mark.parametrize("snapshot", [None, "db-1", ["db-1"]])
+def test_an_issue_without_an_entity_still_reads(monkeypatch, snapshot):
+    """No `entitySnapshot`, or one that is not an object, reads as no entity — null in
+    the reading — rather than as a traceback out of `measure()`."""
     issue = _issue("CRITICAL", name="Org policy drift")
-    issue["entity"] = None
+    issue["entitySnapshot"] = snapshot
     result = _run(_check(aggregation_level="entity"), FakeWiz([issue]), monkeypatch)
     critical = next(c for c in result.children if c.name == "critical")
     assert critical.reason_texts[0].startswith("[Org policy drift](")
@@ -656,6 +712,462 @@ def test_low_warns_and_medium_errors_by_default(monkeypatch):
     assert bands["low"] is StatusCode.WARN
     assert bands["medium"] is StatusCode.ERROR
     assert bands["informational"] is StatusCode.OK
+
+
+# --- What is read, and which control keys a line (ADR-0004) -------------------------
+
+
+def _rule(kind, rule_id, name=None, control=None):
+    """One of an issue's `sourceRules` in WIZ's documented shape; a configuration rule
+    carries its parent `control`, which may be null."""
+    rule = {"__typename": kind, "id": rule_id, "name": name or f"rule {rule_id}"}
+    if kind == "CloudConfigurationRule":
+        rule["control"] = control
+    return rule
+
+
+def _issue_with(rules, issue_id="i1", entity="db-1"):
+    return {"id": issue_id, "severity": "HIGH", "status": "OPEN", "sourceRules": rules,
+            "entitySnapshot": {"name": entity, "type": "DATABASE"}}
+
+
+def _high(result):
+    return next(child for child in result.children if child.name == "high")
+
+
+def test_a_configuration_rules_issue_is_filed_under_its_parent_control(monkeypatch):
+    """ADR-0004 decision 3: the control the superseded query answered such an issue
+    with — so its key does not move — and never the rule's own id."""
+    issue = _issue_with([_rule("CloudConfigurationRule", "ccr-7",
+                               control={"id": "wc-3", "name": "Parent control"})])
+    check = _check()
+    readings = _readings(check, FakeWiz([issue]), monkeypatch)
+    record = readings[1].record
+    assert (record["control_id"], record["control_name"]) == ("wc-3", "Parent control")
+    high = _high(run_check(check, measurements=readings))
+    assert [entry.slug for entry in high.reason_entries] == ["wiz-control-wc-3"]
+    assert high.reason_texts[0].startswith("[**Parent control**](")
+
+
+def test_the_ignore_list_skips_a_configuration_rules_issue_by_its_parent_control(
+        monkeypatch):
+    """`ignore_control_ids` matches the control a line is filed under, which for a
+    configuration rule's issue is its parent — not the rule's own id."""
+    issue = _issue_with([_rule("CloudConfigurationRule", "ccr-7",
+                               control={"id": "wc-3", "name": "Parent control"})])
+    skipped = _high(_run(_check(ignore_control_ids=("wc-3",)), FakeWiz([issue]),
+                         monkeypatch))
+    kept = _high(_run(_check(ignore_control_ids=("ccr-7",)), FakeWiz([issue]),
+                      monkeypatch))
+    assert (skipped.code, skipped.reason_texts) == (StatusCode.OK, [])
+    assert [entry.slug for entry in kept.reason_entries] == ["wiz-control-wc-3"]
+
+
+@pytest.mark.parametrize(("rules", "smallest"), [
+    ([_rule("Control", "wc-9"), _rule("Control", "wc-2"),
+      _rule("CloudConfigurationRule", "ccr-1", control={"id": "wc-5", "name": "5"})],
+     "wc-2"),
+    ([_rule("Control", "wc-9"),
+      _rule("CloudConfigurationRule", "ccr-1", control={"id": "wc-1", "name": "1"})],
+     "wc-1"),
+])
+def test_an_issue_naming_several_controls_goes_under_the_smallest_id_in_any_order(
+        monkeypatch, rules, smallest):
+    """ADR-0004 decision 3: the line is keyed by an identifier, never by a position in
+    WIZ's array, so the rules reordered still key the same line (little-sister
+    ADR-0050) — a configuration rule's parent counting as one of the controls."""
+    for order in (rules, list(reversed(rules))):
+        high = _high(_run(_check(), FakeWiz([_issue_with(order)]), monkeypatch))
+        assert [entry.slug for entry in high.reason_entries] == [
+            f"wiz-control-{smallest}"]
+
+
+def test_rules_that_name_no_control_leave_the_issue_a_line_of_its_own(monkeypatch):
+    """ADR-0001 decision 4, kept by ADR-0004 decision 3: no rules at all, a cloud
+    event rule, a configuration rule whose parent is null — each issue keys a line
+    of its own, and none shares one."""
+    issues = [_issue_with([], issue_id="none"),
+              _issue_with([_rule("CloudEventRule", "cer-1")], issue_id="event"),
+              _issue_with([_rule("CloudConfigurationRule", "ccr-1", control=None)],
+                          issue_id="orphan"),
+              _issue_with(["wc-1", None], issue_id="junk"),
+              _issue_with("Control wc-1", issue_id="text")]
+    high = _high(_run(_check(), FakeWiz(issues), monkeypatch))
+    assert [entry.slug for entry in high.reason_entries] == [
+        "wiz-none", "wiz-event", "wiz-orphan", "wiz-junk", "wiz-text"]
+
+
+def test_a_control_without_an_id_keys_nothing_and_still_names_the_line(monkeypatch):
+    """ADR-0004 decision 3: a control with no id cannot key a line, so the issue keys
+    its own (ADR-0001 decision 4) — while the control's name still reaches that line,
+    as it did under the old query — and it never outranks a control that has an id."""
+    alone = _high(_run(_check(), FakeWiz([_issue_with(
+        [_rule("Control", "", name="Org policy drift")], issue_id="u1")]), monkeypatch))
+    assert [entry.slug for entry in alone.reason_entries] == ["wiz-u1"]
+    assert "[Org policy drift](" in alone.reason_texts[0]
+    beside = _high(_run(_check(), FakeWiz([_issue_with(
+        [_rule("Control", "", name="No id"), _rule("Control", "wc-4", name="Four")],
+        issue_id="u2")]), monkeypatch))
+    assert [entry.slug for entry in beside.reason_entries] == ["wiz-control-wc-4"]
+
+
+def test_the_entity_is_wizs_entity_snapshot(monkeypatch):
+    """ADR-0004 decision 4: `entitySnapshot` names the affected object; the old
+    query's `entity`, which WIZ removed in 2022, is not read even where it rides
+    along."""
+    issue = _issue_with([_rule("Control", "wc-1")], entity="vm-1")
+    issue["entitySnapshot"]["type"] = "VIRTUAL_MACHINE"
+    issue["entity"] = {"name": "stale-name", "type": "BUCKET"}
+    check = _check(aggregation_level="entity")
+    readings = _readings(check, FakeWiz([issue]), monkeypatch)
+    record = readings[1].record
+    assert (record["entity_name"], record["entity_type"]) == ("vm-1", "VIRTUAL_MACHINE")
+    line = _high(run_check(check, measurements=readings)).reason_texts[0]
+    assert line.startswith("**vm-1** (virtual machine) — ")
+    assert "stale-name" not in line
+
+
+# --- The readings: what a run measures, and what has a history (ADR-0003) -----------
+
+
+def test_a_run_is_the_estate_first_and_then_one_reading_per_issue(monkeypatch):
+    """ADR-0003 decision 1: the tenant's exposure, then every issue WIZ returned, in
+    the order WIZ returned them."""
+    readings = _readings(_check(), FakeWiz([_issue("CRITICAL", issue_id="c1"),
+                                            _issue("LOW", issue_id="l1")]),
+                         monkeypatch)
+    assert [reading.record["kind"] for reading in readings] == [
+        "estate", "issue", "issue"]
+    assert [reading.record["id"] for reading in readings[1:]] == ["c1", "l1"]
+
+
+def test_an_issue_reading_carries_exactly_what_its_line_says(monkeypatch):
+    """What the line says has to be in the record, because the grading may read
+    nothing else (little-sister ADR-0086 decision 6) — and nothing more is kept."""
+    issue = _issue("CRITICAL", control_id="wc-9", name="Open port", entity="vm-1",
+                   issue_id="u-1")
+    issue["status"] = "IN_PROGRESS"
+    reading = _readings(_check(), FakeWiz([issue]), monkeypatch)[1]
+    assert reading.record == {
+        "kind": "issue", "id": "u-1", "severity": "CRITICAL",
+        "status": "IN_PROGRESS", "control_id": "wc-9", "control_name": "Open port",
+        "entity_name": "vm-1", "entity_type": "BUCKET"}
+
+
+def test_no_issue_names_a_subject_so_none_has_a_history(monkeypatch):
+    """ADR-0003 decision 3: an issue is the grading's input and nothing more — no
+    series, and so no event and no state to name either."""
+    readings = _readings(_check(), FakeWiz([_issue("HIGH", issue_id="a"),
+                                            _issue("LOW", issue_id="b")]),
+                         monkeypatch)
+    assert [(r.subject, r.identity, r.state) for r in readings[1:]] == [
+        ("", "", ""), ("", "", "")]
+
+
+def test_a_value_wiz_did_not_send_is_null_and_never_missing(monkeypatch):
+    """One shape for every reading (little-sister ADR-0085 decision 3), so whatever
+    reads a record reads a gap from a null instead of guessing it from an absence."""
+    reading = _readings(_check(), FakeWiz([{"severity": "HIGH"}]), monkeypatch)[1]
+    assert reading.record == {
+        "kind": "issue", "id": None, "severity": "HIGH", "status": None,
+        "control_id": None, "control_name": None, "entity_name": None,
+        "entity_type": None}
+
+
+def test_the_estate_is_the_object_this_check_declared(monkeypatch):
+    """ADR-0003 decision 3: the endpoint's host and the client_id reference, declared
+    at construction so a run that raises is still recorded against it."""
+    check = _check()
+    assert check.subject == "api.example.app.wiz.io;credential=env://WIZ_CLIENT_ID"
+    estate = _readings(check, FakeWiz([]), monkeypatch)[0]
+    assert estate.subject == check.subject
+    assert estate.identity == ""
+
+
+def test_a_reference_is_kept_whole_scheme_and_all():
+    """Two teams' references may differ in nothing but their scheme — a resolver per
+    team, the same path in each — and a spelling that kept only the path would make
+    their two estates one."""
+    url = "https://api.example.app.wiz.io/graphql"
+    first = _estate_subject(url, "team-a:///wiz/client_id")
+    second = _estate_subject(url, "team-b:///wiz/client_id")
+    assert first == "api.example.app.wiz.io;credential=team-a:///wiz/client_id"
+    assert first != second
+
+
+def test_an_endpoint_urllib_cannot_split_is_named_as_written():
+    """The subject is declared at load, where an `api_url` urllib refuses to split
+    must not become a traceback: the estate is named by the value as written, and
+    the first run says what is wrong with it."""
+    assert (_estate_subject("https://[not-a-host/graphql", "env://WIZ_CLIENT_ID")
+            == "https://[not-a-host/graphql;credential=env://WIZ_CLIENT_ID")
+
+
+def test_an_in_progress_issue_says_so_on_its_own_line_too(monkeypatch):
+    """The entity level writes the line itself, and says *in progress* there."""
+    issue = _issue("CRITICAL", issue_id="p1")
+    issue["status"] = "IN_PROGRESS"
+    result = _run(_check(aggregation_level="entity"), FakeWiz([issue]), monkeypatch)
+    critical = next(c for c in result.children if c.name == "critical")
+    assert critical.reason_texts[0].endswith(" · *in progress*")
+
+
+def test_an_estate_too_long_for_a_subject_refuses_to_load_and_quotes_nothing(
+        monkeypatch):
+    """Refused rather than cut, because a cut name could be another estate's — and
+    the sentence names the parts, not the reference, which could be a credential
+    pasted where its reference belongs."""
+    name = "WIZ_" + "X" * 200
+    monkeypatch.setenv(name, "id")
+    with pytest.raises(CheckError) as caught:
+        _check(client_id_ref=f"env://{name}")
+    message = str(caught.value)
+    assert "past the 200 a subject may have" in message
+    assert name not in message
+
+
+def test_an_estate_of_exactly_the_limit_loads(monkeypatch):
+    """The other side of the refusal: two hundred characters is a subject."""
+    prefix = "api.example.app.wiz.io;credential=env://"
+    name = "W" * (200 - len(prefix))
+    monkeypatch.setenv(name, "id")
+    assert len(_check(client_id_ref=f"env://{name}").subject) == 200
+
+
+def test_the_counts_are_wiz_s_taken_before_the_ignore_list(monkeypatch):
+    """ADR-0003 decision 2: the estate keeps what WIZ reported and the band shows
+    what the deployment grades, so a curve of the exposure does not jump the day
+    somebody edits `ignore_control_ids`."""
+    check = _check(ignore_control_ids=("wc-2",))
+    readings = _readings(check, FakeWiz([
+        _issue("CRITICAL", control_id="wc-2", issue_id="a"),
+        _issue("CRITICAL", control_id="wc-1", issue_id="b")]), monkeypatch)
+    assert readings[0].record["bands"]["critical"] == 2
+    assert len(readings) == 3                       # the ignored issue is read too
+    critical = next(child for child in
+                    run_check(check, measurements=readings).children
+                    if child.name == "critical")
+    assert [entry.slug for entry in critical.reason_entries] == ["wiz-control-wc-1"]
+
+
+def test_every_declared_band_is_counted_and_an_invented_one_gets_a_key(monkeypatch):
+    """Five keys on every run that read, at zero when empty, and a severity WIZ
+    invents after them, by name."""
+    readings = _readings(_check(), FakeWiz([_issue("ZETA", issue_id="z"),
+                                            _issue("HIGH", issue_id="h"),
+                                            _issue("ALPHA", issue_id="a")]),
+                         monkeypatch)
+    bands = readings[0].record["bands"]
+    assert bands == {"critical": 0, "high": 1, "medium": 0, "low": 0,
+                     "informational": 0, "alpha": 1, "zeta": 1}
+    assert list(bands) == ["critical", "high", "medium", "low", "informational",
+                           "alpha", "zeta"]
+
+
+@pytest.mark.parametrize(("error", "fault"), [
+    (WizError("HTTP 503", status=503, fault=Fault.TRANSIENT), "transient"),
+    (WizError("HTTP 403", status=403, fault=Fault.ANSWERED), "answered"),
+    (WizError("no nodes", status=200, fault=Fault.MALFORMED), "malformed"),
+    (DeadlineExceeded("the run's budget of 30s ran out after 30.0s"), "deadline"),
+])
+def test_a_failed_read_is_the_estate_alone_and_its_counts_are_null(
+        monkeypatch, error, fault):
+    """Null, never zero: a zero there would keep, as a series, the tenant reported
+    clean by a check that was told nothing (ADR-0002 decision 6)."""
+    readings = _readings(_check(), FakeWiz(error=error), monkeypatch)
+    assert len(readings) == 1
+    record = readings[0].record
+    assert record["bands"] == dict.fromkeys(SEVERITY_ORDER)
+    assert record["page_full"] is None
+    assert record["failure"] == {"fault": fault, "error": str(error)}
+    assert readings[0].state == f"failed={fault}"
+
+
+def test_a_run_that_read_carries_no_failure(monkeypatch):
+    """The fault says whether the read worked; there is no second field for it."""
+    record = _readings(_check(), FakeWiz([]), monkeypatch)[0].record
+    assert record == {"kind": "estate", "bands": dict.fromkeys(SEVERITY_ORDER, 0),
+                      "page_full": False, "failure": None}
+
+
+def test_the_state_is_the_exposure_spelled_from_what_constitutes_it(monkeypatch):
+    """ADR-0003 decision 4 (little-sister ADR-0087 decision 3): each band's count and
+    the page flag when it is set — nothing that changes while the exposure does
+    not."""
+    full = _readings(_check(), FakeWiz([_issue("CRITICAL", issue_id="c"),
+                                        _issue("BIZARRE", issue_id="b")], more=True),
+                     monkeypatch)[0]
+    assert full.state == ("critical=1;high=0;medium=0;low=0;informational=0;"
+                          "bizarre=1;page=full")
+    quiet = _readings(_check(), FakeWiz([]), monkeypatch)[0]
+    assert quiet.state == "critical=0;high=0;medium=0;low=0;informational=0"
+
+
+def test_two_failures_of_one_fault_are_one_state_whatever_they_said(monkeypatch):
+    """The sentence is not part of the state: its words change from one message to
+    the next while the state — WIZ could not be asked — does not."""
+    first = _readings(_check(), FakeWiz(error=WizError(
+        "HTTP 502", status=502, fault=Fault.TRANSIENT)), monkeypatch)[0]
+    second = _readings(_check(), FakeWiz(error=WizError(
+        "connection reset", status=None, fault=Fault.TRANSIENT)), monkeypatch)[0]
+    assert first.state == second.state == "failed=transient"
+    assert first.record["failure"] != second.record["failure"]
+
+
+def test_a_state_that_would_not_travel_is_a_digest_of_an_unambiguous_form(
+        monkeypatch):
+    """A `;` or `=` inside a severity WIZ invented would let two exposures spell
+    alike. The digest is of the fields themselves, so they stay two states."""
+    ambiguous = _readings(_check(), FakeWiz([_issue("A=1;B", issue_id="x")]),
+                          monkeypatch)[0]
+    plain_two = _readings(_check(), FakeWiz([_issue("A", issue_id="x"),
+                                             _issue("B", issue_id="y")]),
+                          monkeypatch)[0]
+    assert plain_two.state.endswith(";a=1;b=1")
+    assert ambiguous.state.startswith("sha256:")
+    assert len(ambiguous.state) == len("sha256:") + 32
+    assert ambiguous.state != plain_two.state
+
+
+def test_a_state_too_long_to_travel_is_a_digest_and_the_same_one_every_time(
+        monkeypatch):
+    """Decided at run time from WIZ's answer, so a refusal would be an error on every
+    poll; the digest is stable, so an unchanged exposure is still one state."""
+    many = [_issue(f"SEVERITY-{n:03d}", issue_id=f"i{n}") for n in range(20)]
+    first = _readings(_check(), FakeWiz(many), monkeypatch)[0]
+    second = _readings(_check(), FakeWiz(list(many)), monkeypatch)[0]
+    assert first.state.startswith("sha256:")
+    assert first.state == second.state
+
+
+def test_the_node_is_a_container_that_rolls_up_to_the_worst_band(monkeypatch):
+    """ADR-0003 decision 5: the root declares nothing and says nothing — the shape
+    from which the engine keeps, for the estate, what the run rolls up to: the
+    tenant's worst band, where a declared `OK` would have been kept on every run."""
+    result = _run(_check(), FakeWiz([_issue("LOW", issue_id="l")]), monkeypatch)
+    assert result.stored_code is StatusCode.UNDEFINED
+    assert result.reason_texts == []
+    rolled = effective_code(result.stored_code,
+                            (child.stored_code for child in result.children))
+    assert rolled is StatusCode.WARN
+
+
+def test_with_every_band_pinned_the_node_reads_maintenance_where_it_read_ok(
+        monkeypatch):
+    """The one place the node's rolled-up code differs from the old root's `OK`:
+    nothing under it is counted, because everything under it was silenced."""
+    result = _run(_check(), FakeWiz([]), monkeypatch)
+    pinned = [StatusCode.MAINTENANCE for _child in result.children]
+    assert effective_code(result.stored_code, pinned) is StatusCode.MAINTENANCE
+    assert effective_code(StatusCode.OK, pinned) is StatusCode.OK
+
+
+def test_every_entity_level_line_carries_the_reading_it_was_made_from(monkeypatch):
+    """ADR-0003 decision 6: a line made from one reading carries its record as the
+    line's `data`; an issue names no subject, so neither does its line."""
+    check = _check(aggregation_level="entity")
+    readings = _readings(check, FakeWiz([_issue("HIGH", issue_id="a", entity="db-1"),
+                                         _issue("HIGH", issue_id="b", entity="db-2")]),
+                         monkeypatch)
+    high = next(child for child in run_check(check, measurements=readings).children
+                if child.name == "high")
+    assert [entry.data for entry in high.reason_entries] == [
+        dict(reading.record) for reading in readings[1:]]
+    assert {entry.subject for entry in high.reason_entries} == {""}
+
+
+def test_a_control_line_carries_a_reading_only_when_one_issue_made_it(monkeypatch):
+    """A line made from several readings carries none, since no one record is what
+    it read."""
+    check = _check()
+    readings = _readings(check, FakeWiz([
+        _issue("HIGH", control_id="wc-1", issue_id="a", entity="db-1"),
+        _issue("HIGH", control_id="wc-1", issue_id="b", entity="db-2"),
+        _issue("HIGH", control_id="wc-2", issue_id="c", entity="queue-1")]),
+        monkeypatch)
+    high = next(child for child in run_check(check, measurements=readings).children
+                if child.name == "high")
+    several, one = high.reason_entries
+    assert several.data is None
+    assert one.data == dict(readings[3].record)
+
+
+def test_a_name_past_the_budget_is_clipped_once_and_the_line_says_what_was_kept(
+        monkeypatch):
+    """little-sister ADR-0086 decision 7, and the one change a line shows: a name
+    longer than 300 characters is shortened in the reading, and the line is written
+    from the reading."""
+    long_name = "control-" + "x" * 400
+    check = _check(aggregation_level="entity")
+    readings = _readings(check, FakeWiz([_issue("HIGH", name=long_name,
+                                                issue_id="a")]), monkeypatch)
+    kept = readings[1].record["control_name"]
+    assert kept == long_name[:300]
+    line = next(child for child in run_check(check, measurements=readings).children
+                if child.name == "high").reason_texts[0]
+    assert f"[{kept}](" in line
+    assert long_name not in line
+
+
+def test_a_name_is_clipped_by_the_bytes_the_seam_counts_too(monkeypatch):
+    """Characters are not bytes once JSON has escaped them: 300 emoji would weigh
+    3602 bytes, so the byte budget is what bites."""
+    emoji = "😀" * 300
+    assert len(emoji) == 300                           # the literal is what it says
+    reading = _readings(_check(), FakeWiz([_issue("HIGH", entity=emoji,
+                                                  issue_id="a")]), monkeypatch)[1]
+    kept = reading.record["entity_name"]
+    assert emoji.startswith(kept)
+    assert len(json.dumps(kept).encode()) <= 600 < len(json.dumps(kept + "😀").encode())
+
+
+def test_an_identifier_too_long_to_keep_is_a_digest_and_never_a_prefix(monkeypatch):
+    """A clipped identifier could meet another one; a digest cannot."""
+    base = "i" * 200
+    one = _readings(_check(), FakeWiz([_issue("HIGH", issue_id=base + "1")]),
+                    monkeypatch)[1]
+    two = _readings(_check(), FakeWiz([_issue("HIGH", issue_id=base + "2")]),
+                    monkeypatch)[1]
+    assert one.record["id"].startswith("sha256:")
+    assert one.record["id"] != two.record["id"]
+
+
+def test_the_heaviest_issue_reading_fits_the_default_record_limit(monkeypatch):
+    """ADR-0003 decision 7: every field is bounded, so no answer — however strange —
+    makes a record the seam refuses. This is the proof at the bound."""
+    emoji = "😀" * 400
+    issue = {"id": "i" * 500, "severity": emoji, "status": emoji,
+             "sourceRules": [{"__typename": "Control", "id": "c" * 500,
+                              "name": emoji}],
+             "entitySnapshot": {"name": emoji, "type": emoji}}
+    reading = _readings(_check(), FakeWiz([issue]), monkeypatch)[1]
+    assert None not in reading.record.values()     # every field read, none empty
+    assert len(json.dumps(reading.record).encode()) <= 2048
+
+
+def test_the_grading_reads_the_readings_and_nothing_else(monkeypatch):
+    """little-sister ADR-0086 decision 6: graded again, with the world gone and the
+    clock moved, the same readings give the same tree."""
+    check = _check()
+    readings = _readings(check, FakeWiz([_issue("CRITICAL", issue_id="c")]),
+                         monkeypatch)
+
+    def gone(*_args, **_kwargs):
+        raise AssertionError("the grading reached for the world")
+
+    monkeypatch.setattr(check, "_make_client", gone)
+    first = run_check(check, measurements=readings)
+    later = run_check(check, measurements=readings,
+                      now=datetime(2030, 1, 1, tzinfo=UTC))
+    assert first == later
+
+
+def test_readings_without_an_estate_are_graded_as_nothing_read():
+    """Only the engine's own failure record has no estate, and the engine grades that
+    itself; anything else handed over this way is a reading of nothing."""
+    result = run_check(_check(), measurements=[])
+    assert result.code is StatusCode.ERROR
+    assert "nothing was read" in result.reason_texts[0]
 
 
 # --- WizClient, through the real request path ---------------------------------
@@ -685,8 +1197,8 @@ class _Answer:
         """What `fetch._read` calls, and it calls nothing else on a body stream.
         `read1` rather than `read` because a real `read(n)` blocks until it has all *n*
         bytes: reading a body with it cannot be bounded by a clock, which is the defect
-        little-sister ADR-0058's 2026-08-16 amendment records. A double offering `read`
-        alone would still be modelling the version that could not be bounded."""
+        little-sister ADR-0058 records. A double offering `read`
+        alone would still be modeling the version that could not be bounded."""
         size = len(self._body) if size < 0 else size
         chunk, self._body = self._body[:size], self._body[size:]
         return chunk
@@ -744,8 +1256,10 @@ def _through(answer):
 
 
 _TOKEN_OK = b'{"access_token": "tok"}'
-_ONE_ISSUE = (b'{"data": {"issues": {"nodes": '
-              b'[{"id": "i1", "severity": "CRITICAL"}]}}}')
+_ONE_ISSUE = (b'{"data": {"issues": {"nodes": [{"id": "i1", "severity": "CRITICAL", '
+              b'"status": "OPEN", "sourceRules": [{"__typename": "Control", '
+              b'"id": "wc-1", "name": "Public bucket"}], '
+              b'"entitySnapshot": {"name": "bucket-a", "type": "BUCKET"}}]}}}')
 
 
 def _sequence(*answers):
@@ -774,13 +1288,44 @@ def test_the_client_authenticates_then_queries():
     used as the bearer on the second."""
     with _through(_sequence(_Answer(body=_TOKEN_OK),
                             _Answer(body=_ONE_ISSUE))) as (build, opener):
-        issues = build().issues(10)
+        issues = build().issues(10).nodes
     assert [issue["id"] for issue in issues] == ["i1"]
     auth, query = opener.requests
     assert auth.get_method() == "POST"
     assert b"client_credentials" in auth.data
     assert query.get_header("Authorization") == "Bearer tok"
     assert query.get_header("Content-type") == "application/json"
+
+
+def test_the_client_asks_wizs_documented_query_for_the_two_types():
+    """ADR-0004 decisions 1 and 2: `issuesV2` under WIZ's own `issues:` alias, open and
+    in progress, worst first — filtered to the two types the superseded query
+    answered, so a threat detection is never asked for."""
+    with _through(_sequence(_Answer(body=_TOKEN_OK),
+                            _Answer(body=_ONE_ISSUE))) as (build, opener):
+        build().issues(10)
+    body = json.loads(opener.requests[1].data)
+    assert re.search(r"\{\s*issues:\s*issuesV2\(", body["query"])
+    assert body["variables"] == {
+        "first": 10,
+        "filterBy": {"status": ["OPEN", "IN_PROGRESS"],
+                     "type": ["TOXIC_COMBINATION", "CLOUD_CONFIGURATION"]},
+        "orderBy": {"field": "SEVERITY", "direction": "DESC"}}
+
+
+def test_a_documented_answer_reads_through_to_its_line(monkeypatch):
+    """The whole path in the shape WIZ's page documents, through the real client: a
+    Control's issue keys `wiz-control-<id>`, and its line names the entity."""
+    check = _check()
+    with _through(_sequence(_Answer(body=_TOKEN_OK),
+                            _Answer(body=_ONE_ISSUE))) as (build, _opener):
+        monkeypatch.setattr(check, "_make_client",
+                            lambda cid, sec, deadline=None: build(deadline=deadline))
+        result = run_check(check)
+    critical = next(child for child in result.children if child.name == "critical")
+    assert [entry.slug for entry in critical.reason_entries] == ["wiz-control-wc-1"]
+    assert critical.reason_texts[0].startswith("[**Public bucket**](")
+    assert critical.reason_texts[0].endswith(" — **bucket-a** (bucket)")
 
 
 def test_a_plain_500_is_retried_now():
@@ -798,7 +1343,7 @@ def test_a_plain_500_is_retried_now():
         return _Answer(body=_ONE_ISSUE)
 
     with _through(flaky) as (build, _opener):
-        assert len(build().issues(10)) == 1
+        assert len(build().issues(10).nodes) == 1
     assert len(attempts) == 3          # token, the 500, and the retry that worked
 
 
@@ -861,14 +1406,14 @@ def test_a_429_is_transient_here_and_the_wait_it_names_is_honored():
                         _graphql_error(429, b"{}", {"Retry-After": "4"}),
                         _Answer(body=_ONE_ISSUE))
     with _through(answers) as (build, _opener):
-        assert len(build(sleep=slept.append).issues(10)) == 1
+        assert len(build(sleep=slept.append).issues(10).nodes) == 1
     assert slept == [4.0]                      # WIZ's four seconds, not our one
 
 
 def test_only_the_standard_retry_after_is_read():
-    """No vendor dialect is invented here, deliberately: a header set nobody has
-    verified is worse than not reading one. A 429 with WIZ-shaped headers we have not
-    confirmed falls back to our own backoff."""
+    """No vendor dialect is read here, deliberately. WIZ's documentation says its API
+    adheres to `Retry-After`, so a 429 carrying only WIZ's own `x-ratelimit-*` headers
+    falls back to our own backoff rather than to a second reading of the same fact."""
     slept = []
     answers = _sequence(_Answer(body=_TOKEN_OK),
                         _graphql_error(429, b"{}",
@@ -893,11 +1438,11 @@ def test_a_transient_auth_failure_is_retried_too():
         return _Answer(body=_ONE_ISSUE)
 
     with _through(flaky) as (build, _opener):
-        assert len(build().issues(10)) == 1
+        assert len(build().issues(10).nodes) == 1
 
 
 def test_an_auth_answer_without_a_token_is_malformed_not_a_traceback():
-    """It used to be a bare `KeyError` — raised past `run()`'s `except WizError`, so
+    """It used to be a bare `KeyError` — raised past the run's `except WizError`, so
     the engine reported the whole check as an all-or-nothing check error instead of a
     reading (little-sister ADR-0040)."""
     with _through(_Answer(body=b'{"token_type": "Bearer"}')) as (build, _opener):
@@ -909,7 +1454,7 @@ def test_an_auth_answer_without_a_token_is_malformed_not_a_traceback():
 
 def test_auth_that_answers_with_something_other_than_json_is_malformed():
     """A proxy login page where a token was expected. Also a `JSONDecodeError`
-    escaping `run()` before this."""
+    escaping the run before this."""
     with _through(_Answer(body=b"<html>a proxy login page</html>")) as (build, _o):
         with pytest.raises(WizError) as caught:
             build().issues(10)
@@ -957,7 +1502,7 @@ def test_a_query_answer_that_is_not_a_json_object_is_malformed():
     """The two shapes above `data` itself: not JSON at all, and JSON that is not an
     object. A gateway's HTML error page reaches a 200 more often than it should, and
     `json.loads` on a bare `[]` or `null` would make the reads below raise
-    `AttributeError` out of `run()` instead of reporting anything."""
+    `AttributeError` out of `measure()` instead of reporting anything."""
     for body in (b"<html>gateway timeout</html>", b"[]", b"null", b'"nope"'):
         with _through(_sequence(_Answer(body=_TOKEN_OK),
                                 _Answer(body=body))) as (build, _opener):
@@ -972,7 +1517,7 @@ def test_an_empty_nodes_list_really_is_zero_issues():
     with _through(_sequence(_Answer(body=_TOKEN_OK),
                             _Answer(body=b'{"data": {"issues": {"nodes": []}}}'))) \
             as (build, _opener):
-        assert build().issues(10) == []
+        assert build().issues(10).nodes == []
 
 
 def test_one_request_may_never_outlive_what_is_left_of_the_run():
@@ -1067,3 +1612,17 @@ def test_the_token_is_fetched_once_per_client():
         client.issues(10)
         client.issues(10)
     assert len(opener.requests) == 3           # not 4
+
+
+def test_the_page_flag_is_wiz_s_own_has_next_page():
+    """The query already asked for `pageInfo`; the page now says what it answered,
+    and says nothing where the answer did not (ADR-0001 decision 8)."""
+    full = (b'{"data": {"issues": {"nodes": [], '
+            b'"pageInfo": {"hasNextPage": true, "endCursor": "c"}}}}')
+    with _through(_sequence(_Answer(body=_TOKEN_OK), _Answer(body=full))) \
+            as (build, _opener):
+        assert build().issues(10).more is True
+    silent = b'{"data": {"issues": {"nodes": []}}}'
+    with _through(_sequence(_Answer(body=_TOKEN_OK), _Answer(body=silent))) \
+            as (build, _opener):
+        assert build().issues(10).more is None

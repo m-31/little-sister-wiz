@@ -1,13 +1,16 @@
 """The ``wiz`` check type: open cloud-security issues, one leaf per severity band.
 
-Authenticates to WIZ with OAuth2 client credentials, queries open and in-progress
-issues over GraphQL, and reports one leaf per severity band under the check's node,
-from ``critical`` through ``informational``. Each band is graded by a configurable
+Authenticates to WIZ with OAuth2 client credentials, asks WIZ's ``issuesV2`` query
+for the open and in-progress issues a Control or a configuration rule raised, and
+reports one leaf per severity band under the check's node, from ``critical`` through
+``informational``. Each band is graded by a configurable
 ``severity_map`` and lists its findings. Findings are grouped by WIZ control ID by
 default; ``aggregation_level: entity`` gives one line per issue and affected entity.
 Ported from an older in-house alerting dashboard. Why it is shaped this way — the
 band as the unit that grades, and what a line is keyed by — is
-``docs/adr/0001-severity-bands-are-what-grades.md``.
+``docs/adr/0001-severity-bands-are-what-grades.md``; which issues are read, and which
+control a line is keyed by now that WIZ names the rules that raised an issue, is
+``docs/adr/0004-the-issues-are-asked-of-issuesv2.md``.
 
 A band's lines are **keyed entries** rather than plain strings (little-sister
 ADR-0036), slugged by the identity of the configured aggregation level — a WIZ
@@ -22,17 +25,27 @@ Registered in little-sister's ``CHECK_TYPES`` on import — importing
 configs. The OAuth2 credentials are named by the config's ``secrets:`` block and
 resolved once at construction (little-sister ADR-0023).
 
+A run is two halves (little-sister ADR-0086). :meth:`WizCheck.measure` reads WIZ and
+hands back the **estate** — the tenant's exposure per severity band, and whether the
+read worked — and then one reading per issue; :meth:`WizCheck.grade` builds the bands
+and their lines out of those readings and nothing else. What each reading is, which of
+them has a history and what that history is of are
+``docs/adr/0003-a-run-is-the-exposure-and-its-issues.md``.
+
 Everything imported from little-sister below is part of its **check-authoring
-surface** (architecture.md §11), which is what the ``require_api(2)`` in this
+surface** (architecture.md §11), which is what the ``require_api(3)`` in this
 package's ``__init__`` pins.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
 import urllib.parse
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -40,6 +53,7 @@ from little_sister.checks import (
     Check,
     CheckError,
     CheckResult,
+    Measurement,
     coerce_code,
     config_markdown,
     parse_secret_refs,
@@ -47,7 +61,13 @@ from little_sister.checks import (
     register,
 )
 from little_sister.fetch import Response, fault_for, fetch, retry_after
-from little_sister.reasons import derived_slug, slug
+from little_sister.reasons import (
+    MAX_SUBJECT_LENGTH,
+    Entry,
+    clip,
+    derived_slug,
+    slug,
+)
 from little_sister.status import StatusCode
 from little_sister.transport import (
     Deadline,
@@ -81,6 +101,22 @@ TRANSIENT_RETRIES = 2
 #: to help — and it is spent only while the run's deadline can still afford it.
 RETRY_BACKOFF_SECONDS = 1.0
 
+#: Free text a reading keeps — a control's name, an entity's name, a failure's
+#: sentence — clipped **once**, in the measuring half, to this many characters and
+#: then to this many of the bytes the seam weighs a record in (little-sister ADR-0086
+#: decision 7). The line is written from the clipped value, so what a grading says
+#: today can always be said again from the reading stored beside it. The numbers are
+#: little-sister-github's, and for the same reason: two names and a sentence stay far
+#: inside a 2 KB record however they are spelled.
+_TEXT_CHARS = 300
+_TEXT_BYTES = 600
+
+#: What an identifier or a short field WIZ sends is held to — an issue's id, a
+#: control's id, a severity, a status, an entity's kind. WIZ mints these short (an
+#: issue id is a UUID), so the bound is not met in practice; it exists so that no
+#: answer, however strange, makes a record the seam refuses (ADR-0003 decision 7).
+_SHORT_BYTES = 100
+
 # Built-in display text for the severity-band leaves this check emits (little-sister
 # ADR-0025). This text is type-inherent, so it is written once here rather than copied
 # into every deployment config; a second tenant's check is then config only. It is
@@ -100,7 +136,7 @@ RETRY_BACKOFF_SECONDS = 1.0
 #
 # **No `title` here either**, and for a related reason: a band's title is derived
 # from its severity (`band_glyph`) rather than written per band, so the row cannot
-# grow a sixth entry whose colour nobody chose. What is authored here is prose;
+# grow a sixth entry whose color nobody chose. What is authored here is prose;
 # `_band_labels` is where the derived half joins it.
 SUBNODES: dict[str, dict[str, str]] = {
     "critical": {"about": "Critical-severity WIZ issues — fix immediately.\n\n"
@@ -171,11 +207,11 @@ def band_rank(severity: str) -> int:
 #: draws both (little-sister ADR-0061), so the word is never lost.
 #:
 #: **By name** was the decision, and the sister package is why. Ranking the ramp
-#: would make a colour mean *where this band sits in this row* rather than *how bad
+#: would make a color mean *where this band sits in this row* rather than *how bad
 #: this is*: over there a deployment configures which severities are watched, so the
 #: same `high` is rank 1 in one aspect and rank 2 in the next, and would wear a
 #: different circle in each on one dashboard. Nobody reads a red circle that way. The
-#: rank still orders the row (little-sister ADR-0055); the colour is a different
+#: rank still orders the row (little-sister ADR-0055); the color is a different
 #: question with a different answer.
 #:
 #: `informational` is **green and not white**: the bottom of a severity scale is not
@@ -191,7 +227,7 @@ BAND_GLYPHS = {
 
 #: What a severity this package does not name gets. The band list is **open** — WIZ
 #: may add a severity tomorrow, and a `severity_map` may name one this package has
-#: never heard of — and a band with no colour must not borrow one. Worth keeping
+#: never heard of — and a band with no color must not borrow one. Worth keeping
 #: precisely because it is rare enough to mean something.
 UNKNOWN_BAND_GLYPH = "❓"
 
@@ -209,7 +245,7 @@ def _band_labels(severities: Iterable[str]) -> dict[str, dict[str, str]]:
     `title` — the band's glyph, which is a function of the severity rather than a
     line somebody wrote. A band with no prose still declares its circle, so a
     severity a `severity_map` names and this package does not describe is
-    labelled rather than bare, and a deployment writing `{default}` into a title
+    labeled rather than bare, and a deployment writing `{default}` into a title
     for it still gets that circle back.
 
     What this cannot cover is a severity that appears **only in a run's
@@ -235,11 +271,35 @@ DEFAULT_SEVERITY_MAP = {
     "informational": StatusCode.OK,
 }
 
-# Trimmed to the fields we use: ID, severity, control, and entity.
+#: The issue types this check reads: an issue a Control raised and one a configuration
+#: rule raised — the two the superseded ``issues`` query answered. A threat detection
+#: rule's, ``THREAT_DETECTION``, is not read (ADR-0004 decision 2).
+ISSUE_TYPES = ("TOXIC_COMBINATION", "CLOUD_CONFIGURATION")
+
+#: The most issues one query may ask for. WIZ's *Get Risk Issues* page takes ``first``
+#: from 1 to 1000, and what a query outside that gets back is WIZ's to choose on every
+#: run — so a configuration outside it refuses to load instead (ADR-0004 decision 5).
+MAX_FIRST = 1000
+
+# WIZ's documented query (*Get Risk Issues*, ``IssuesTable``) under WIZ's own
+# ``issues:`` alias, so the answer is ``data.issues.nodes`` as it always was. Trimmed
+# to what a line reads: the id, the severity and the status; the Controls and the
+# configuration rules among the rules that raised the issue, a configuration rule by
+# its parent control; and the affected entity (ADR-0004 decision 1).
 _ISSUES_QUERY = """
-query Issues($first: Int, $filterBy: IssueFilters, $orderBy: IssueOrder) {
-  issues(first: $first, filterBy: $filterBy, orderBy: $orderBy) {
-    nodes { id severity status control { id name } entity { name type } }
+query IssuesTable($filterBy: IssueFilters, $first: Int, $orderBy: IssueOrder) {
+  issues: issuesV2(filterBy: $filterBy, first: $first, orderBy: $orderBy) {
+    nodes {
+      id
+      severity
+      status
+      sourceRules {
+        __typename
+        ... on Control { id name }
+        ... on CloudConfigurationRule { control { id name } }
+      }
+      entitySnapshot { name type }
+    }
     pageInfo { hasNextPage endCursor }
   }
 }
@@ -300,12 +360,198 @@ def _parse_aggregation_level(value: object) -> str:
     return level
 
 
-def _entity_text(issue: dict[str, Any]) -> str:
+def _first(value: object) -> int:
+    """``first`` as WIZ takes it — an integer from 1 to :data:`MAX_FIRST` — or a
+    refusal at load that says so (ADR-0004 decision 5). The shape of
+    little-sister-github's ``_positive_int``, with WIZ's ceiling: a ``bool`` is not a
+    count, and a string of digits is read as the number it spells."""
+    refusal = (f"wiz 'first' must be an integer from 1 to {MAX_FIRST}, the most "
+               f"issues one WIZ query may ask for")
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise CheckError(refusal)
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise CheckError(refusal) from error
+    if not 1 <= parsed <= MAX_FIRST:
+        raise CheckError(refusal)
+    return parsed
+
+
+def _text_bytes(text: str) -> int:
+    """What one string weighs inside a record, in the bytes the seam counts — the
+    JSON the record is weighed as, which escapes to ASCII."""
+    return len(json.dumps(text).encode("utf-8"))
+
+
+def _kept(value: object) -> str | None:
+    """Free text as a reading keeps it and as the line will say it — clipped once,
+    in the measuring half (little-sister ADR-0086 decision 7) — and ``None`` where
+    WIZ sent nothing, so that every reading has one shape (its decision 6)."""
+    if not value:
+        return None
+    return clip(str(value), chars=_TEXT_CHARS, budget=_TEXT_BYTES)
+
+
+def _short(value: object) -> str | None:
+    """A short field WIZ sends — a severity, a status, an entity's kind — held to
+    :data:`_SHORT_BYTES`, and ``None`` where WIZ sent nothing."""
+    if not value:
+        return None
+    return clip(str(value), chars=_SHORT_BYTES, budget=_SHORT_BYTES)
+
+
+def _ident(value: object) -> str | None:
+    """An identifier WIZ minted, kept whole — or, past :data:`_SHORT_BYTES`, as
+    ``sha256:`` and 32 hex digits of it, because a clipped identifier could meet
+    another one and a digest cannot. ``None`` where WIZ sent none; an empty one
+    stays empty, since the lines read the two alike."""
+    if value is None:
+        return None
+    text = str(value)
+    if _text_bytes(text) <= _SHORT_BYTES:
+        return text
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
+def band_of(severity: object) -> str:
+    """The band a severity lands in: its name in lower case, and ``unknown`` where
+    WIZ sent none. One function for the counts the estate keeps and for the bands
+    the grading builds, so the two cannot disagree about a name."""
+    return str(severity or "unknown").lower()
+
+
+def _control_of(issue: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The control an issue's rules name — its ``id`` and ``name`` as WIZ sent them —
+    and an empty mapping where they name none (ADR-0004 decision 3).
+
+    A ``Control`` names itself. A configuration rule names its parent ``control``,
+    which is the control the superseded query answered such an issue with. Any other
+    rule names none. Where the rules name more than one control, the one with the
+    smallest id, compared as text — never the first WIZ lists, because a key taken
+    from a position in an array moves when WIZ reorders it, and a maintenance pin
+    moves with it (little-sister ADR-0050). A control without an id is only named
+    where no control has one, so its name still reaches the line while the issue is
+    keyed by itself (ADR-0001 decision 4).
+    """
+    rules = issue.get("sourceRules")
+    named: list[Mapping[str, Any]] = []
+    for rule in rules if isinstance(rules, list) else ():
+        if not isinstance(rule, Mapping):
+            continue
+        kind = rule.get("__typename")
+        control = (rule if kind == "Control"
+                   else rule.get("control") if kind == "CloudConfigurationRule"
+                   else None)
+        if isinstance(control, Mapping):
+            named.append(control)
+    identified = [control for control in named if control.get("id")]
+    if identified:
+        return min(identified, key=lambda control: str(control["id"]))
+    return named[0] if named else {}
+
+
+def _issue_reading(issue: Mapping[str, Any]) -> Measurement:
+    """One issue as the grading will read it: exactly what its line says, and
+    nothing else (ADR-0003 decision 1). It names no subject — an issue has no
+    history (decision 3) — so it is the grading's input and nothing more.
+
+    The control is the one the issue's rules name (:func:`_control_of`) and the
+    entity is WIZ's ``entitySnapshot`` (ADR-0004 decisions 3 and 4); the fields keep
+    the names they had while the query answered ``control`` and ``entity`` (its
+    decision 1)."""
+    control = _control_of(issue)
+    entity = issue.get("entitySnapshot")
+    if not isinstance(entity, Mapping):
+        entity = {}
+    return Measurement(record={
+        "kind": "issue",
+        "id": _ident(issue.get("id")),
+        "severity": _short(issue.get("severity")),
+        "status": _short(issue.get("status")),
+        "control_id": _ident(control.get("id")),
+        "control_name": _kept(control.get("name")),
+        "entity_name": _kept(entity.get("name")),
+        "entity_type": _short(entity.get("type")),
+    })
+
+
+def _band_counts(readings: Sequence[Measurement]) -> dict[str, int]:
+    """How many issues each band holds, **before** the ignore list: the tenant's
+    exposure as WIZ reports it, not the deployment's grading of it (ADR-0003
+    decision 2). Every declared severity is a key, at zero when it is empty; a
+    severity WIZ invents becomes one in the run it appears, after the declared ones
+    and by name."""
+    counts: dict[str, int] = {}
+    for reading in readings:
+        band = band_of(reading.record["severity"])
+        counts[band] = counts.get(band, 0) + 1
+    return {**{severity: counts.get(severity, 0) for severity in SEVERITY_ORDER},
+            **{severity: counts[severity] for severity in sorted(counts)
+               if severity not in SEVERITY_ORDER}}
+
+
+def _estate_state(record: Mapping[str, Any]) -> str:
+    """The state the estate is in — what its series keeps one record per spell of
+    (little-sister ADR-0087 decision 3; ADR-0003 decision 4).
+
+    Spelled from what constitutes the exposure and nothing else: each band's count,
+    the declared five first, and ``page=full`` where WIZ held more than the page —
+    ``critical=3;high=12;medium=40;low=7;informational=2``. A failed read is a state
+    of its own, ``failed=<fault>``. Never the failure's sentence, whose words change
+    from one message to the next while the state does not.
+
+    A state is bounded like a subject and compared by equality alone, so where the
+    spelling would not travel — too long, a control character, or a ``;`` or ``=``
+    inside a severity WIZ invented, which would let two exposures spell alike — it is
+    ``sha256:`` and 32 hex digits of the same fields in an unambiguous form. Refusing
+    is not available here, as it is for the subject: this is decided at run time,
+    from WIZ's answer, and a refusal would turn one strange answer into an error on
+    every poll.
+    """
+    failure = record["failure"]
+    bands: Mapping[str, int | None] = record["bands"]
+    names: list[str] = []
+    if failure is not None:
+        spelled = f"failed={failure['fault']}"
+    else:
+        names = list(bands)
+        spelled = ";".join(f"{name}={bands[name]}" for name in names)
+        if record["page_full"]:
+            spelled += ";page=full"
+    if (len(spelled) <= MAX_SUBJECT_LENGTH
+            and not any(ord(ch) < 32 or ord(ch) == 127 for ch in spelled)
+            and not any(";" in name or "=" in name for name in names)):
+        return spelled
+    fields = json.dumps({"bands": list(bands.items()),
+                         "page_full": record["page_full"],
+                         "fault": None if failure is None else failure["fault"]},
+                        separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(fields.encode("utf-8")).hexdigest()[:32]
+
+
+def _estate_subject(api_url: str, client_id_ref: str) -> str:
+    """The object this check watches — the **estate** — as its configuration draws
+    it: ``<api host>;credential=<client_id reference>`` (ADR-0003 decision 3).
+
+    The endpoint alone is not the estate: two checks can read one endpoint with two
+    credentials, and each sees what its own credential sees. The credential's value
+    may not travel, and its reference may, because a reference is a name and the
+    value is resolved once (little-sister ADR-0023). It is kept whole, scheme and
+    all, since two references may differ in nothing else.
+    """
+    try:
+        host = urllib.parse.urlsplit(api_url).hostname or api_url
+    except ValueError:
+        host = api_url
+    return f"{host};credential={client_id_ref}"
+
+
+def _entity_text(record: Mapping[str, Any]) -> str:
     """Render one affected entity without adding another WIZ link."""
-    entity = issue.get("entity") or {}
-    name = str(entity.get("name") or "")
-    kind = str(entity.get("type") or "").replace("_", " ").lower()
-    issue_id = str(issue.get("id") or "")
+    name = str(record["entity_name"] or "")
+    kind = str(record["entity_type"] or "").replace("_", " ").lower()
+    issue_id = str(record["id"] or "")
 
     if name:
         text = f"**{plain(name)}**"
@@ -313,92 +559,128 @@ def _entity_text(issue: dict[str, Any]) -> str:
             text += f" ({plain(kind)})"
     else:
         text = f"WIZ issue {plain(issue_id)}" if issue_id else "WIZ issue"
-    if str(issue.get("status") or "").upper() == "IN_PROGRESS":
+    if str(record["status"] or "").upper() == "IN_PROGRESS":
         text += " · *in progress*"
     return text
 
 
-def _issue_entry(issue: dict[str, Any], severity: str) -> tuple[str, str]:
-    """Render one entity-level issue as ``(slug, text)``.
+def _issue_entry(record: Mapping[str, Any], severity: str) -> Entry:
+    """Render one entity-level issue as its line.
 
     The text leads with the affected entity, because that is the thing an engineer
     has to change. The control that flagged it follows and carries the deep link. The
     earlier wording led with the control, which read as a policy name and left the
     actual subject, often a bare resource ID, trailing after a dash. The entity kind
     comes from the payload and makes a resource ID legible.
+
+    The line is made from one reading, so it carries it: the issue's record is the
+    line's ``data`` (ADR-0003 decision 6).
     """
-    control = issue.get("control") or {}
-    control_name = str(control.get("name") or control.get("id") or "issue")
-    entity = issue.get("entity") or {}
-    name = str(entity.get("name") or "")
-    kind = str(entity.get("type") or "").replace("_", " ").lower()
-    issue_id = str(issue.get("id") or "")
+    control_name = str(record["control_name"] or record["control_id"] or "issue")
+    name = str(record["entity_name"] or "")
+    kind = str(record["entity_type"] or "").replace("_", " ").lower()
+    issue_id = str(record["id"] or "")
 
     flagged = f"[{plain(control_name)}]({_issue_link(issue_id, severity)})" \
         if issue_id else plain(control_name)
     if name:
-        subject = f"**{plain(name)}**"
+        affected = f"**{plain(name)}**"
         if kind:
-            subject += f" ({plain(kind)})"
-        text = f"{subject} — {flagged}"
+            affected += f" ({plain(kind)})"
+        text = f"{affected} — {flagged}"
     else:
         text = flagged
-    if str(issue.get("status") or "").upper() == "IN_PROGRESS":
+    if str(record["status"] or "").upper() == "IN_PROGRESS":
         text += " · *in progress*"
     # Without an ID there is nothing stable to key on, so fall back to
     # little-sister's content hash rather than to a position (little-sister ADR-0036).
-    return (slug("wiz", issue_id) if issue_id else derived_slug(text)), text
+    return Entry(slug("wiz", issue_id) if issue_id else derived_slug(text), text,
+                 data=dict(record))
 
 
-def _control_entry(control_id: str, issues: list[dict[str, Any]],
-                   severity: str) -> tuple[str, str]:
-    """Render one control-level aggregate with one representative WIZ link."""
-    control = issues[0].get("control") or {}
-    control_name = str(control.get("name") or control_id)
+def _control_entry(control_id: str, records: list[Mapping[str, Any]],
+                   severity: str) -> Entry:
+    """Render one control-level aggregate with one representative WIZ link.
+
+    A line made from **one** issue carries that issue's reading; a line made from
+    several carries none, because no one record is what it read (ADR-0003
+    decision 6)."""
+    control_name = str(records[0]["control_name"] or control_id)
     issue_id = ""
-    for issue in issues:
-        issue_id = str(issue.get("id") or "")
+    for record in records:
+        issue_id = str(record["id"] or "")
         if issue_id:
             break
 
     control_text = f"**{plain(control_name)}**"
     if issue_id:
         control_text = f"[{control_text}]({_issue_link(issue_id, severity)})"
-    affected = [_entity_text(issue) for issue in issues]
+    affected = [_entity_text(record) for record in records]
     text = f"{control_text} — {', '.join(affected)}"
-    return slug("wiz", "control", control_id), text
+    return Entry(slug("wiz", "control", control_id), text,
+                 data=dict(records[0]) if len(records) == 1 else None)
 
 
-def _id_entries(items: list[dict[str, Any]],
-                severity: str) -> list[tuple[str, str]]:
+def _id_entries(records: list[Mapping[str, Any]], severity: str) -> list[Entry]:
     """Group one severity band's issues by WIZ ``control.id``.
 
     A missing control ID gets its own issue-level bucket. Missing IDs must not share
     an empty-string bucket because that would merge unrelated findings and move a
     maintenance pin onto the wrong work.
     """
-    buckets: list[tuple[str | None, list[dict[str, Any]]]] = []
+    buckets: list[tuple[str | None, list[Mapping[str, Any]]]] = []
     positions: dict[str, int] = {}
-    for issue in items:
-        control = issue.get("control") or {}
-        control_id = str(control.get("id") or "")
+    for record in records:
+        control_id = str(record["control_id"] or "")
         if not control_id:
-            buckets.append((None, [issue]))
+            buckets.append((None, [record]))
             continue
         position = positions.get(control_id)
         if position is None:
             positions[control_id] = len(buckets)
-            buckets.append((control_id, [issue]))
+            buckets.append((control_id, [record]))
         else:
-            buckets[position][1].append(issue)
+            buckets[position][1].append(record)
 
-    entries: list[tuple[str, str]] = []
+    entries: list[Entry] = []
     for bucket_control_id, grouped in buckets:
         if bucket_control_id is None:
             entries.append(_issue_entry(grouped[0], severity))
         else:
             entries.append(_control_entry(bucket_control_id, grouped, severity))
     return entries
+
+
+def _failed(failure: Mapping[str, Any]) -> CheckResult:
+    """What a failed read means, from the fault it recorded (ADR-0002 decision 5).
+
+    **A read failure is not a finding about the tenant.** *We could not ask* warns —
+    a transient failure, and the run's own budget running out; an answer WIZ gave,
+    and an answer that cannot be read, still grade ERROR — a rejected credential and
+    a changed schema are both real, and both are somebody's to fix. No band is
+    written, so each keeps its previous reading and goes stale on freshness, which
+    says *this is the last thing we actually knew* rather than inventing five bands
+    from an answer that never arrived.
+    """
+    error = plain(str(failure["error"]))
+    if failure["fault"] == "deadline":
+        return CheckResult(StatusCode.WARN, [error])
+    if failure["fault"] == Fault.TRANSIENT.name.lower():
+        return CheckResult(StatusCode.WARN,
+                           [f"could not ask WIZ this run: {error}"])
+    return CheckResult(StatusCode.ERROR, [f"WIZ query failed: {error}"])
+
+
+@dataclass(frozen=True)
+class IssuePage:
+    """What one query answered: the issues on its page, and whether WIZ holds more.
+
+    ``more`` is the answer's ``pageInfo.hasNextPage``, and ``None`` where the answer
+    did not say. The query asks for one page of ``first`` issues, worst first, so
+    with ``more`` set the page is a floor under the tenant's exposure rather than the
+    whole of it (ADR-0001 decision 8)."""
+    nodes: list[dict[str, Any]]
+    more: bool | None
 
 
 class WizClient:
@@ -500,7 +782,7 @@ class WizClient:
             token = str(json.loads(response.body)["access_token"])
         except (ValueError, KeyError, TypeError) as error:
             # **It arrived and it cannot be used.** This used to escape as a bare
-            # `KeyError` or `JSONDecodeError` — past `run()`'s `except WizError`, so
+            # `KeyError` or `JSONDecodeError` — past the run's `except WizError`, so
             # the engine turned the whole check into a traceback rather than a reading
             # (little-sister ADR-0040). Not transient: the same request returns the
             # same shape.
@@ -522,8 +804,8 @@ class WizClient:
         self._token = self._ask(self._token_request)
         return self._token
 
-    def _query(self, payload: bytes, headers: dict[str, str]) -> list[dict[str, Any]]:
-        """One GraphQL POST, and the three ways it can fail to be a list of issues."""
+    def _query(self, payload: bytes, headers: dict[str, str]) -> IssuePage:
+        """One GraphQL POST, and the three ways it can fail to be a page of issues."""
         response = self._post(self._api_url, payload, headers, what="WIZ query")
         if response.status != 200:
             raise self._refusal(response, "WIZ query failed")
@@ -555,17 +837,23 @@ class WizClient:
             raise WizError("WIZ answered the query without a 'data.issues.nodes' "
                            "list — nothing to read", status=response.status,
                            fault=Fault.MALFORMED)
-        return list(issues["nodes"])
+        page_info = issues.get("pageInfo")
+        more = page_info.get("hasNextPage") if isinstance(page_info, dict) else None
+        return IssuePage(nodes=list(issues["nodes"]),
+                         more=more if isinstance(more, bool) else None)
 
-    def issues(self, first: int) -> list[dict[str, Any]]:
-        """Open and in-progress issues, worst severity first (a single page of
-        ``first``, matching the original — see ADR-0001 §8's cap note)."""
+    def issues(self, first: int) -> IssuePage:
+        """Open and in-progress issues of the types this check reads
+        (:data:`ISSUE_TYPES`), worst severity first (a single page of ``first``,
+        matching the original — see ADR-0001 §8's cap note), and whether WIZ holds
+        more than the page."""
         token = self._get_token()
         payload = json.dumps({
             "query": _ISSUES_QUERY,
             "variables": {
                 "first": first,
-                "filterBy": {"status": ["OPEN", "IN_PROGRESS"]},
+                "filterBy": {"status": ["OPEN", "IN_PROGRESS"],
+                             "type": list(ISSUE_TYPES)},
                 "orderBy": {"field": "SEVERITY", "direction": "DESC"},
             },
         }).encode("utf-8")
@@ -592,13 +880,31 @@ class WizCheck(Check):
         # the same two values below, so nothing is read twice.
         severities = {**DEFAULT_SEVERITY_MAP, **(severity_map or {})}
         level = _parse_aggregation_level(aggregation_level)
-        super().__init__(subnode_defaults=_band_labels(severities),
+        # Refused here as well as at load, so that a check built in code asks WIZ
+        # for no page it would refuse either (ADR-0004 decision 5).
+        first = _first(first)
+        # The estate, declared here as little-sister ADR-0086 decision 4 asks, so a
+        # run that raises is still recorded against the estate it failed to reach.
+        # **Refused, never cut**, when it will not fit a subject, because a cut name
+        # could be another estate's (ADR-0003 decision 3). The sentence names the
+        # parts and not the reference, which may not be one yet: a credential pasted
+        # where its reference belongs is the resolver's to refuse, without quoting it.
+        subject = _estate_subject(api_url, client_id_ref)
+        if len(subject) > MAX_SUBJECT_LENGTH:
+            raise CheckError(
+                f"wiz: the estate this check reads is named by the api_url's host "
+                f"and the client_id reference, {len(subject)} characters together "
+                f"— past the {MAX_SUBJECT_LENGTH} a subject may have. It is refused "
+                f"rather than cut, because a cut name could be another estate's; a "
+                f"shorter client_id reference fits")
+        super().__init__(subject=subject,
+                         subnode_defaults=_band_labels(severities),
                          label_tokens={"entry_note": ENTRY_NOTES[level]},
                          **kwargs)
         # Resolved **once here** from the references the config's `secrets:`
         # block names (little-sister ADR-0023) — never re-read during a run. An
         # unresolvable reference leaves these empty and records the failure, and
-        # the engine pins this check to a visible ERROR without calling run().
+        # the engine pins this check to a visible ERROR without calling measure().
         self.client_id = self.resolve_secret(client_id_ref)
         self.client_secret = self.resolve_secret(client_secret_ref)
         self.api_url = api_url
@@ -625,7 +931,7 @@ class WizCheck(Check):
         return {
             "api_url": str(api_url),
             "token_url": str(config.get("token_url", TOKEN_URL)),
-            "first": int(config.get("first", 500)),
+            "first": _first(config.get("first", 500)),
             "severity_map": severity_map,
             "ignore_control_ids": tuple(str(i) for i in ignore),
             "aggregation_level": _parse_aggregation_level(
@@ -714,37 +1020,91 @@ class WizCheck(Check):
                          token_url=self.token_url, timeout=self.timeout_seconds,
                          deadline=deadline)
 
-    def run(self) -> CheckResult:
+    def _estate(self, *, bands: Mapping[str, int | None] | None = None,
+                page_full: bool | None = None,
+                failure: Mapping[str, str] | None = None) -> Measurement:
+        """The run's own reading: the tenant's exposure, and whether the read worked
+        (ADR-0003 decision 1).
+
+        **One shape on every run** (little-sister ADR-0085 decision 3): every
+        declared band is a key, its count **null** when the read failed — never zero,
+        which would bring the tenant reported clean by a check told nothing back as
+        a series (ADR-0002 decision 6) — ``page_full`` null with it, and ``failure``
+        null on a run that read. It names the estate this check declared, so it is
+        the reading the engine places when it is the only one, and it names the state
+        the exposure is in (ADR-0003 decision 4).
+        """
+        record: dict[str, Any] = {
+            "kind": "estate",
+            "bands": (dict(bands) if bands is not None
+                      else dict.fromkeys(SEVERITY_ORDER)),
+            "page_full": page_full,
+            "failure": None if failure is None else dict(failure),
+        }
+        return Measurement(record=record, subject=self.subject,
+                           state=_estate_state(record))
+
+    def measure(self) -> list[Measurement]:
+        """Read WIZ: the estate first, then one reading per issue on the page
+        (ADR-0003 decision 1).
+
+        The token and the query are the whole of what a run asks, so a failure of
+        either is the run's: the estate is then the only reading, carrying the fault
+        and the sentence, and the grading says what that means. Nothing here decides
+        a code or writes a line, and nothing is left out — the ignore list, the
+        grading map and the aggregation level are the grading's (ADR-0003
+        decision 2), because a reading that left something out would be a reading of
+        the configuration rather than of WIZ.
+        """
         # `timeout:` is the whole run's budget and this is where it starts ticking.
         deadline = self._new_deadline()
         try:
             client = self._make_client(self.client_id, self.client_secret, deadline)
-            issues = client.issues(self.first)
+            page = client.issues(self.first)
         except DeadlineExceeded as cut:
             # The run's own budget, not WIZ's fault and not the tenant's. Nothing was
-            # read, so unlike the sister package there is nothing partial to keep: this
-            # check's whole reading comes from one query.
-            return CheckResult(StatusCode.WARN, [plain(str(cut))])
+            # read, so unlike the sister package there is nothing partial to keep:
+            # this check's whole reading comes from one query.
+            return [self._estate(failure={"fault": "deadline",
+                                          "error": _kept(str(cut)) or ""})]
         except WizError as error:
-            # **A read failure is not a finding about the tenant** (ADR-0002). *We
-            # could not ask* warns; an answer WIZ gave, and an answer we cannot read,
-            # still grade ERROR — a rejected credential and a changed schema are both
-            # real, and both are somebody's to fix.
             if error.fault is Fault.TRANSIENT:
                 logger.warning("%s: could not ask WIZ (%s)", self.path, error)
-                return CheckResult(
-                    StatusCode.WARN,
-                    [f"could not ask WIZ this run: {plain(str(error))}"])
-            return CheckResult(StatusCode.ERROR,
-                               [f"WIZ query failed: {plain(str(error))}"])
+            return [self._estate(failure={"fault": error.fault.name.lower(),
+                                          "error": _kept(str(error)) or ""})]
+        readings = [_issue_reading(issue) for issue in page.nodes]
+        return [self._estate(bands=_band_counts(readings), page_full=page.more),
+                *readings]
 
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for issue in issues:
-            control = issue.get("control") or {}
-            if str(control.get("id")) in self.ignore_control_ids:
+    def grade(self, measurements: Sequence[Measurement],
+              now: datetime) -> CheckResult:
+        """The bands and their lines, from the readings alone (little-sister
+        ADR-0086 decision 6): the estate says whether the read worked, and the
+        issues are what the bands list. ``now`` is not read — nothing this check
+        says depends on when it is said.
+        """
+        estate: Mapping[str, Any] | None = None
+        issues: list[Mapping[str, Any]] = []
+        for measurement in measurements:
+            kind = measurement.record.get("kind")
+            if kind == "estate":
+                estate = measurement.record
+            elif kind == "issue":
+                issues.append(measurement.record)
+        if estate is None:
+            # Only a failure record the engine wrote has no estate reading, and the
+            # engine grades that run itself; this is the guard for a caller handing
+            # over something no measurement of ours produced.
+            return CheckResult(StatusCode.ERROR,
+                               ["no estate reading to grade — nothing was read"])
+        if estate["failure"] is not None:
+            return _failed(estate["failure"])
+
+        groups: dict[str, list[Mapping[str, Any]]] = {}
+        for record in issues:
+            if str(record["control_id"]) in self.ignore_control_ids:
                 continue
-            severity = str(issue.get("severity") or "unknown").lower()
-            groups.setdefault(severity, []).append(issue)
+            groups.setdefault(band_of(record["severity"]), []).append(record)
 
         # Named `band_order` and not `order`: `order` is now a `CheckResult` field
         # meaning a node's rank, and one name for the build sequence and the
@@ -758,15 +1118,17 @@ class WizCheck(Check):
             items = groups.get(severity, [])
             code = (self.severity_map.get(severity, StatusCode.WARN) if items
                     else StatusCode.OK)
-            # (slug, text) pairs, so the band's lines are **members** — each one
-            # separately pinnable while the rest of the band keeps reporting
-            # (little-sister ADR-0036). The configured aggregation level decides
-            # whether that member is a control or one concrete issue for an entity.
-            entries = (_id_entries(items, severity)
-                       if self.aggregation_level == "id"
-                       else [_issue_entry(issue, severity) for issue in items])
+            # The band's lines are **members** — each one separately pinnable while
+            # the rest of the band keeps reporting (little-sister ADR-0036). They
+            # carry no code of their own, the band does, so `entries=True` says what
+            # `(slug, text)` pairs used to say by their shape. The configured
+            # aggregation level decides whether a member is a control or one
+            # concrete issue for an entity.
+            lines = (_id_entries(items, severity)
+                     if self.aggregation_level == "id"
+                     else [_issue_entry(record, severity) for record in items])
             children.append(CheckResult(
-                code, entries, name=severity,
+                code, lines, entries=True, name=severity,
                 description=f"{severity.capitalize()} WIZ issues",
                 # A band this check could name at construction is **declared**,
                 # and the library writes its label; what is left here is the band
@@ -776,4 +1138,8 @@ class WizCheck(Check):
                        else band_glyph(severity)),
                 order=band_rank(severity),
                 config=self._band_config(severity)))
-        return CheckResult(StatusCode.OK, children=tuple(children))
+        # A container, not a claim (ADR-0003 decision 5). The node declares nothing
+        # and rolls up worst-of its bands, as ADR-0001 decision 1 always said — and
+        # so the estate a series keeps carries the tenant's worst band as the code
+        # that stood, where an `OK` here would have kept `OK` on every run.
+        return CheckResult(StatusCode.UNDEFINED, children=tuple(children))

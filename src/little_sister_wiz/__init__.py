@@ -5,7 +5,7 @@ deployment therefore needs one line in its ``wsgi.py``, before it imports
 ``little_sister.app``::
 
     import little_sister_wiz              # noqa: F401  registers its type
-    from little_sister.app import app     # builds the engine
+    from little_sister.app import app     # the app; its start builds the engine
 
 ``require_api`` declares the **check API epoch** this package was built for. It
 refuses at startup, naming both epochs, when the library has moved past the
@@ -17,7 +17,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from little_sister.checks import require_api
 
-require_api(2)
+require_api(3)
 
 from little_sister_wiz import wiz  # noqa: E402  registers the type
 

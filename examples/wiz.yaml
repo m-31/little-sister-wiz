@@ -21,6 +21,10 @@ frequency: 10m
 # key: at four requests a run, this number is a sane bound for one request too. If you
 # are upgrading, note that it used to be spent per request and bounded nothing.
 timeout: 120s
+# How much of the tenant's exposure to keep as its history: one record each time a
+# band's count changes, or the read starts or stops failing, the oldest out. Issues
+# keep none. The default, 0, keeps no history at all.
+# series_keep: 60
 
 # --- Credentials --------------------------------------------------------------
 # Where the secrets live, never the secrets themselves (little-sister ADR-0023).
@@ -39,7 +43,8 @@ api_url: https://api.<region>.app.wiz.io/graphql
 # token_url: https://auth.app.wiz.io/oauth/token   # default; tenant-independent
 
 # Issues fetched per run — a single page, not a pagination bound. Raise it if a
-# tenant has more open findings than this; nothing pages past it.
+# tenant has more open findings than this; nothing pages past it. From 1 to 1000,
+# WIZ's limit for one query: outside that, the check refuses to load.
 first: 500
 
 # --- What a line is -------------------------------------------------------------
