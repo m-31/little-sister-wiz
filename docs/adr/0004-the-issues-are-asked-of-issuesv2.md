@@ -1,15 +1,16 @@
 # ADR-0004 — The issues are asked of `issuesV2`, for the two types the old query answered
 
 - **Status:** Accepted
-- **Date:** 2026-09-26
-- **Related:** [ADR-0001](0001-severity-bands-are-what-grades.md) (the bands, and a
-  line keyed by its control — decisions 2, 3, 4, 6 and 8, which this keeps, the last
-  with WIZ's ceiling), [ADR-0002](0002-a-read-failure-is-not-a-finding.md) (what a
-  refused or unreadable answer means, which this keeps exactly),
+- **Date:** 2026-10-17 (accepted 2026-09-26)
+- **Related:** [ADR-0001](0001-severity-bands-are-what-grades.md) (the bands, and a line
+  keyed by its control — decisions 2, 3, 4, 6 and 8, which this keeps, the last with
+  WIZ's ceiling), [ADR-0002](0002-a-read-failure-is-not-a-finding.md) (what a refused or
+  unreadable answer means, which this keeps exactly),
   [ADR-0003](0003-a-run-is-the-exposure-and-its-issues.md) (the readings, their field
-  names and their bounds, which this keeps exactly), little-sister **ADR-0050** (a key
-  is an identifier, never a position), little-sister **ADR-0036** (a line is a member a
-  pin can hold)
+  names and their bounds, which this keeps, two times added), little-sister **ADR-0050**
+  (a key is an identifier, never a position), little-sister **ADR-0036** (a line is a
+  member a pin can hold), [ADR-0005](0005-an-issues-line-is-written-from-a-form.md) (the
+  issue's line the two times are asked for)
 
 > Every reference to one of little-sister's records is written out as **little-sister
 > ADR-00NN**, because the two numbering spaces overlap.
@@ -72,6 +73,16 @@ gives `OBJECT_DELETED` as the reason, between the run that still counted it and 
 next. Where a decision below rests on these measurements it says so, and where it rests
 on WIZ's word it says that.
 
+**The two times the query asks for were measured the same way.** WIZ's page was not
+read for them; what stands for it is WIZ's own answer, measured as the query was before
+it was asked. For each of the two configured checks, exactly as each asks, WIZ's schema
+has `Issue.createdAt` as a `DateTime!` and `Issue.dueAt` as a `DateTime`, neither
+deprecated, and the query with both answered the same issues in the same order as the
+query without them, with no error and nothing beside its data — where an undocumented
+query is answered with a warning first. `createdAt` came on every issue, 243 of 243,
+each in UTC to the microsecond; `dueAt` on 3 of one estate's 138 — both of its medium
+issues, and one informational — and on none of the other's 105.
+
 ## Decision
 
 ### 1. The query is the one WIZ documents, and the readings keep their names
@@ -79,7 +90,10 @@ on WIZ's word it says that.
 The check asks `issuesV2` under WIZ's own alias, `issues:`, as its page writes it, so the
 answer is `data.issues.nodes` as it always was and ADR-0002 decision 6 reads it
 unchanged: an empty list is zero issues, a missing one is no answer. It asks for what a
-line reads and nothing else — each issue's id, severity and status; the `Control`s and
+line reads and nothing else — each issue's id, severity and status; `createdAt` and
+`dueAt`, when WIZ detected it and when it is due where the tenant's SLA rules give it a
+date, for the issue's line to say
+([ADR-0005](0005-an-issues-line-is-written-from-a-form.md) §7); the `Control`s and
 configuration rules among its `sourceRules`, a configuration rule by its parent
 `control`; and the `entitySnapshot`'s name and type. The variables are the old ones, one
 page of `first`, open and in progress, worst severity first, with a `type` filter
@@ -87,10 +101,11 @@ page of `first`, open and in progress, worst severity first, with a `type` filte
 
 **The readings keep their shape and the names of their fields** (ADR-0003 decision 1):
 `control_id` and `control_name` are the control decision 3 names, and `entity_name` and
-`entity_type` are the `entitySnapshot`'s. Those names are stored keys — a deployment's
-line template or grading reads them — so the new source fills the old names rather than
-renaming them. The fields keep their bounds as well, so ADR-0003 decision 7's heaviest
-reading is what it was.
+`entity_type` are the `entitySnapshot`'s, and `created.at` and `due.at` are the two
+times. Those names are stored keys — a deployment's line template or grading reads
+them — so the new source fills the old names rather than renaming them. The fields keep
+their bounds as well, and ADR-0003 decision 7 bounds the two times and weighs the
+heaviest reading with them.
 
 ### 2. The check reads today's estate, and the filter names it
 

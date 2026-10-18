@@ -1,6 +1,6 @@
 [project]
 name = "little-sister-wiz"
-version = "0.1.3"
+version = "0.1.4"
 description = "WIZ cloud-security check type for little-sister."
 authors = [
     { name = "Michael Meyling" }
@@ -35,11 +35,12 @@ requires-python = ">=3.11"
 # a release. The upgrade a floor cannot see, the library moving *past* the
 # surface, is caught by `require_api()` in `__init__.py`.
 #
-# **0.3.18** is the release that speaks **check API epoch 3**: `run()` became
-# `measure()` and `grade()` (little-sister ADR-0086), and a type written for the old
-# shape cannot be adapted at runtime. `require_api()` catches that direction — but only
-# at startup, and a floor naming an older release would let a resolver install the
-# very library that call is about to reject.
+# **0.3.21** is the release that writes a line from a form: `Check.line`, and the
+# `line_forms` and `line_words` a type declares (little-sister ADR-0126). Every issue's
+# line goes through it (ADR-0005), and no earlier release has those names — an *added*
+# name, which `require_api()` cannot see, so only the floor stops a resolver installing
+# a library this package fails against. It speaks **check API epoch 3** as well, where
+# `run()` became `measure()` and `grade()` (little-sister ADR-0086).
 #
 # The floor's other job is unchanged and is why it names a real number rather than the
 # first release with the surface: 0.3.11 has neither `little_sister.transport` nor
@@ -51,7 +52,7 @@ requires-python = ">=3.11"
 # redirect further down — and restores `uv.lock` with it. See `### Requires` in the
 # CHANGELOG for when the floor last moved.
 dependencies = [
-    "little-sister>=0.3.18",
+    "little-sister>=0.3.21",
 ]
 
 # public-urls:begin
@@ -137,16 +138,18 @@ target-version = "py311"
 # ruff-selection:begin
 # One selection for the whole family, so every project lints identically and a
 # fix argued in one of them is a fix in all of them. Beyond ruff's default (E, F):
-# import sorting (I), pyupgrade (UP), bugbear (B), comprehensions (C4) and Ruff's
-# own rules (RUF). Selecting explicitly also pins the gate against ruff's own
-# defaults shifting between releases.
+# import sorting (I), pyupgrade (UP), bugbear (B), comprehensions (C4), the
+# time-zone rules (DTZ) and Ruff's own rules (RUF). DTZ refuses a clock read and a
+# time built without a zone, and a time that is meant as a wall time says so with
+# a `noqa` and its reason (little-sister ADR-0120). Selecting explicitly also pins
+# the gate against ruff's own defaults shifting between releases.
 #
 # The ambiguous-unicode rules are off, and stay off. This family's user-facing
 # text — reasons, subnode titles, chip labels — uses typographic "—", "…", "×" and
 # "·" on purpose, and a rule that flags them would be answered with a `noqa` on
 # every line that has an opinion about punctuation.
 # ruff-selection:end
-select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "DTZ", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
@@ -157,6 +160,12 @@ strict = true
 # Adapted, not copied: little-sister's own `addopts` names `--cov=little_sister`,
 # which from here would measure somebody else's code.
 addopts = "--cov=little_sister_wiz --cov-report=term-missing"
+# pytest-testpaths:begin
+# The suite and nothing else. Without this pytest collects from the project's root,
+# `var/` included, so a `test_*.py` that a copy or a review leaves there runs with
+# the gate, and what the gate counts is no longer the suite.
+# pytest-testpaths:end
+testpaths = ["tests"]
 
 [build-system]
 # uv-build-bound:begin

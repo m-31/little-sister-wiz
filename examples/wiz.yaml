@@ -41,6 +41,9 @@ secrets:
 # load. Take yours from the WIZ console; it looks like `api.<region>.app.wiz.io`.
 api_url: https://api.<region>.app.wiz.io/graphql
 # token_url: https://auth.app.wiz.io/oauth/token   # default; tenant-independent
+# Where the WIZ app answers: every link a line carries is built on it, and an
+# address that is not an http(s) URL with a host refuses to load.
+# app_url: https://app.wiz.io                       # default
 
 # Issues fetched per run — a single page, not a pagination bound. Raise it if a
 # tenant has more open findings than this; nothing pages past it. From 1 to 1000,
@@ -90,3 +93,14 @@ ignore_control_ids: []
 #       {default}
 #
 #       Page the on-call; a critical finding is not left overnight.
+
+# --- What its lines say (optional) ---------------------------------------------
+# An issue's line is written from a **form** the type ships, `issue`, which the
+# node's page names beside the line and `/system/installed` lists with the words
+# and fields it may name. Re-word it here, with no release of the package:
+# `{line.default}` is the shipped text, so a template can add to it. A name the type
+# does not declare is refused at load, naming it. A control's line, at the default
+# `aggregation_level`, is the package's sentence and not a form.
+#
+# display:
+#   issue: "{line.default} — {severity}"

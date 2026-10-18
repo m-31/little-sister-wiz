@@ -11,6 +11,7 @@ from unittest import mock
 import pytest
 from little_sister import fetch as ls_fetch
 from little_sister.checks import CheckError
+from little_sister.reasons import derived_slug
 from little_sister.status import StatusCode, effective_code
 from little_sister.transport import Deadline, DeadlineExceeded, Fault
 from running import measured, run_check
@@ -594,6 +595,9 @@ def test_entity_level_lines_are_members_keyed_by_the_wiz_issue_id(monkeypatch):
 
 
 def test_default_id_level_groups_entities_by_control_id(monkeypatch):
+    """One line per control, its name unlinked, and each entity it flagged linked to
+    its own issue — every issue one click from the line, where it is set in progress
+    or ignored in WIZ."""
     check = _check()
     fake = FakeWiz([
         _issue("CRITICAL", control_id="wc-1", issue_id="abc-123", entity="db-1"),
@@ -607,15 +611,12 @@ def test_default_id_level_groups_entities_by_control_id(monkeypatch):
             in check.subnode_labels["critical"]["about"])
     assert [entry.slug for entry in critical.reason_entries] == [
         "wiz-control-wc-1", "wiz-control-wc-2"]
-    first = critical.reason_texts[0]
-    assert first.startswith("[**Public bucket**](https://app.wiz.io/issues")
-    assert first.count("https://app.wiz.io/issues") == 1
-    assert "**db-1** (bucket)" in first
-    assert "**db-2** (bucket)" in first
-    assert "[**db-1**" not in first
-    assert "[**db-2**" not in first
-    assert "~issue~'abc-123" in first
-    assert "~issue~'def-456" not in first
+    assert critical.reason_texts[0] == (
+        "**Public bucket** — "
+        "[**db-1**](https://app.wiz.io/issues#~(filters~(status~(equals~(~'OPEN"
+        "~'IN_PROGRESS))~severity~(equals~(~'CRITICAL)))~issue~'abc-123)) (bucket), "
+        "[**db-2**](https://app.wiz.io/issues#~(filters~(status~(equals~(~'OPEN"
+        "~'IN_PROGRESS))~severity~(equals~(~'CRITICAL)))~issue~'def-456)) (bucket)")
 
 
 def test_control_slug_survives_reworded_aggregate_content(monkeypatch):
@@ -663,8 +664,8 @@ def test_a_slug_survives_a_reworded_line(monkeypatch):
 
 
 def test_an_issue_without_an_id_falls_back_to_a_content_hash(monkeypatch):
-    """Nothing stable to key on — so the text becomes the identity, never the
-    position in the list."""
+    """Nothing WIZ minted to key on — so what the issue is about becomes the
+    identity, never its text and never its position in the list."""
     check = _check(aggregation_level="entity")
     result = _run(check, FakeWiz([_issue("CRITICAL", issue_id="")]), monkeypatch)
     critical = next(c for c in result.children if c.name == "critical")
@@ -714,6 +715,221 @@ def test_low_warns_and_medium_errors_by_default(monkeypatch):
     assert bands["informational"] is StatusCode.OK
 
 
+# --- What a line says (little-sister ADR-0126) -------------------------------------
+
+def _page(issue_id, severity="HIGH", app="https://app.wiz.io"):
+    """An issue's page in the WIZ app, as a line links it: the issue opened over the
+    list of the open and in-progress issues of its severity."""
+    return (f"{app}/issues#~(filters~(status~(equals~(~'OPEN~'IN_PROGRESS))"
+            f"~severity~(equals~(~'{severity})))~issue~'{issue_id})")
+
+
+def test_an_issues_line_is_written_from_the_form_this_type_declares(monkeypatch):
+    """Every issue's line is written from the form `issue` and names it; a control's
+    line, made from every issue of one control, names none."""
+    check = _check()
+    result = _run(check, FakeWiz([
+        _issue("HIGH", control_id="wc-1", issue_id="a", entity="db-1"),
+        _issue("HIGH", control_id="", issue_id="b", entity="db-2")]), monkeypatch)
+    assert ({form.name for form in check.line_declarations.forms}
+            == set(mod_wiz.LINE_FORMS) == {"issue"})
+    control, alone = _high(result).reason_entries
+    assert not control.form
+    assert alone.form == "issue"
+
+
+def test_an_issues_line_says_what_the_code_said(monkeypatch):
+    """The form says an issue's line as the code wrote it: the entity and its kind,
+    then the control that flagged it linked to the issue, and *in progress* where
+    WIZ has it so — and where WIZ named no entity, the control alone."""
+    worked_on = _issue("CRITICAL", name="Public bucket", entity="db-1", issue_id="p1")
+    worked_on["status"] = "IN_PROGRESS"
+    bare = _issue("CRITICAL", name="Org policy drift", issue_id="p2")
+    bare["entitySnapshot"] = None
+    result = _run(_check(aggregation_level="entity"), FakeWiz([worked_on, bare]),
+                  monkeypatch)
+    critical = next(c for c in result.children if c.name == "critical")
+    assert critical.reason_texts == [
+        f"**db-1** (bucket) — [Public bucket]({_page('p1', 'CRITICAL')}) "
+        f"· *in progress*",
+        f"[Org policy drift]({_page('p2', 'CRITICAL')})"]
+
+
+def test_a_control_with_neither_a_name_nor_an_id_is_a_dash_where_it_was_issue(
+        monkeypatch):
+    """A value that is not there is `—`, as the notation writes it, where the code
+    wrote `issue` for a control WIZ named nothing of."""
+    high = _high(_run(_check(aggregation_level="entity"),
+                      FakeWiz([_issue_with([], issue_id="n1")]), monkeypatch))
+    assert high.reason_texts == [f"**db-1** (database) — [—]({_page('n1')})"]
+
+
+def _shipped(*parts):
+    """A file this package ships beside its code, as text."""
+    from pathlib import Path
+    return Path(__file__).resolve().parents[1].joinpath(*parts).read_text()
+
+
+def _commented(text, opening):
+    """The block a shipped example holds commented out under ``opening``, loaded as
+    a deployment writes it once it takes the `# ` off: the opening line and every
+    indented line after it."""
+    import yaml
+    lines = text.splitlines()
+    start = lines.index(f"# {opening}")
+    block = [lines[start][2:]]
+    for line in lines[start + 1:]:
+        if not line.startswith("#   "):
+            break
+        block.append(line[2:])
+    return yaml.safe_load("\n".join(block))
+
+
+def test_a_deployment_re_words_the_issue_line_in_its_display_block(monkeypatch):
+    """The README's `display:` block re-words the form over this type's default,
+    with no release of this package, and says what the default does not — the
+    severity, a field; a template naming what the type does not declare stops the
+    start, naming it."""
+    import yaml
+    readme = _shipped("README.md").split("keyed by `issue`, with no release of this "
+                                         "package:", 1)[1]
+    written = yaml.safe_load(readme.split("```yaml\n", 1)[1].split("```", 1)[0])
+    check = _check(aggregation_level="entity", **written)
+    issue = _issue("HIGH", name="Public bucket", entity="db-1")
+    issue["status"] = "IN_PROGRESS"
+    assert _high(_run(check, FakeWiz([issue]), monkeypatch)).reason_texts == [
+        "Public bucket on db-1 (HIGH) — being worked on"]
+    with pytest.raises(CheckError, match="assignee"):
+        _check(display={"issue": "{assignee}"})
+
+
+def test_an_issues_line_says_when_wiz_detected_it_and_when_it_is_due(monkeypatch):
+    """ADR-0005 decision 7: after the control, when WIZ detected the issue and, where
+    the tenant's SLA rules give it a date, when it is due — each a time on the
+    configured clock, Kathmandu's here, never an age — and *in progress* after
+    both."""
+    due = _issue("HIGH", issue_id="d1", entity="db-1")
+    due.update(status="IN_PROGRESS", createdAt="2026-09-01T12:00:00.123456Z",
+               dueAt="2026-10-15T02:00:00Z")
+    undated = _issue("HIGH", issue_id="d2", entity="db-2")
+    undated["createdAt"] = "2026-09-20T10:00:00Z"
+    high = _high(_run(_check(aggregation_level="entity"), FakeWiz([due, undated]),
+                      monkeypatch))
+    assert high.reason_texts == [
+        f"**db-1** (bucket) — [Public bucket]({_page('d1')}), detected 2026-09-01 "
+        f"17:45:00, due 2026-10-15 07:45:00 · *in progress*",
+        f"**db-2** (bucket) — [Public bucket]({_page('d2')}), detected 2026-09-20 "
+        f"15:45:00"]
+
+
+def test_a_time_is_kept_in_utc_to_the_microsecond_whatever_its_offset(monkeypatch):
+    """WIZ sends its times in UTC to the microsecond, and that is the one form a
+    reading keeps them in, however they are spelled — so a reading is bounded."""
+    issue = _issue("HIGH")
+    issue.update(createdAt="2026-09-01T14:00:00.12345+02:00",
+                 dueAt="2026-10-15T02:00:00+00:00")
+    record = _readings(_check(), FakeWiz([issue]), monkeypatch)[1].record
+    assert (record["created"], record["due"]) == (
+        {"at": "2026-09-01T12:00:00.123450Z"}, {"at": "2026-10-15T02:00:00Z"})
+
+
+@pytest.mark.parametrize("sent", [
+    "", "yesterday", "2026-09-01", "2026-09-01T12:00:00", 1767225600, ["2026"],
+    "9999-12-31T23:30:00-01:00"])
+def test_a_time_that_is_no_instant_is_null_and_the_run_stands(monkeypatch, sent):
+    """A time WIZ got wrong — no time at all, no offset, not text, or one an offset
+    carries past the calendar's end — is `null` in the reading, and costs that time
+    and nothing else: the line is written without its clause, and the band stands."""
+    issue = _issue("HIGH", issue_id="t1", entity="db-1")
+    issue.update(createdAt=sent, dueAt=sent)
+    check = _check(aggregation_level="entity")
+    readings = _readings(check, FakeWiz([issue]), monkeypatch)
+    assert (readings[1].record["created"], readings[1].record["due"]) == (
+        {"at": None}, {"at": None})
+    high = _high(run_check(check, measurements=readings))
+    assert high.reason_texts == [f"**db-1** (bucket) — [Public bucket]({_page('t1')})"]
+
+
+def test_the_shipped_examples_display_block_says_what_its_comment_promises(
+        monkeypatch):
+    """The example's `display:` block, uncommented, is one the type accepts, and it
+    says what its comment promises: the shipped line, and the issue's severity after
+    it."""
+    check = _check(aggregation_level="entity",
+                   **_commented(_shipped("examples", "wiz.yaml"), "display:"))
+    high = _high(_run(check, FakeWiz([_issue("HIGH", issue_id="a", entity="db-1")]),
+                      monkeypatch))
+    assert high.reason_texts == [
+        f"**db-1** (bucket) — [Public bucket]({_page('a')}) — HIGH"]
+
+
+def test_an_issue_without_an_id_is_keyed_by_what_it_is_about(monkeypatch):
+    """ADR-0001 decision 3: where WIZ sent no id, the key is the content hash of the
+    control that flagged the issue and the entity it affects, so no wording moves
+    it — a renamed control's, or a deployment's template — and nor does WIZ setting
+    it in progress; another entity is another key."""
+    def keyed(check, issue):
+        return _high(_run(check, FakeWiz([issue]), monkeypatch)).reason_entries[0].slug
+
+    entity_level = _check(aggregation_level="entity")
+    first = keyed(entity_level, _issue("HIGH", issue_id="", entity="db-1"))
+    assert first == derived_slug('["wc-1","BUCKET","db-1"]')
+    worked_on = _issue("HIGH", issue_id="", entity="db-1", name="Renamed control")
+    worked_on["status"] = "IN_PROGRESS"
+    assert keyed(entity_level, worked_on) == first
+    assert keyed(_check(aggregation_level="entity", display={"issue": "{entity_name}"}),
+                 _issue("HIGH", issue_id="", entity="db-1")) == first
+    assert keyed(entity_level, _issue("HIGH", issue_id="", entity="db-2")) != first
+
+
+def test_every_link_is_built_on_the_app_url(monkeypatch):
+    """`app_url` is the address every link is built on — an issue's line's, and each
+    entity's on a control's line — WIZ's own by default, and without its trailing
+    slash however it is written."""
+    issues = [_issue("HIGH", control_id="wc-1", issue_id="a", entity="db-1"),
+              _issue("HIGH", control_id="", issue_id="b", entity="db-2")]
+    shipped = _high(_run(_check(), FakeWiz(issues), monkeypatch))
+    assert shipped.reason_texts == [
+        f"**Public bucket** — [**db-1**]({_page('a')}) (bucket)",
+        f"**db-2** (bucket) — [Public bucket]({_page('b')})"]
+    app = "https://app.example.org"
+    configured = _high(_run(_check(app_url=f"{app}/"), FakeWiz(issues), monkeypatch))
+    assert configured.reason_texts == [
+        f"**Public bucket** — [**db-1**]({_page('a', app=app)}) (bucket)",
+        f"**db-2** (bucket) — [Public bucket]({_page('b', app=app)})"]
+
+
+@pytest.mark.parametrize("value", [
+    "", "app.wiz.io", "ftp://app.wiz.io", "https://", "https://app.wiz.io/?tenant=1",
+    "https://app.wiz.io/#issues", "https://app wiz.io", "https://app.wiz.io/\x07",
+    7, None])
+def test_an_app_url_no_browser_would_open_is_refused_at_load(value):
+    """A link on an address no browser opens would leave every line's words without
+    one, and nothing would say why — so the address is refused at load, saying what
+    it must be."""
+    with pytest.raises(CheckError,
+                       match=r"^wiz 'app_url' must be the http\(s\) address of the "
+                             r"WIZ app"):
+        _check(app_url=value)
+
+
+def test_the_loader_reads_the_app_url_and_the_checks_card_names_it(tmp_path):
+    from little_sister.checks import load_checks
+    (tmp_path / "checks").mkdir()
+    (tmp_path / "checks" / "wiz.yaml").write_text(
+        "type: wiz\n"
+        "secrets:\n"
+        "  client_id: env://WIZ_CLIENT_ID\n"
+        "  client_secret: env://WIZ_CLIENT_SECRET\n"
+        "path: /wiz\n"
+        "api_url: https://api.example.app.wiz.io/graphql\n"
+        "app_url: https://app.example.org\n")
+    (check,) = load_checks(str(tmp_path))
+    assert check.app_url == "https://app.example.org"
+    assert "**app:** https://app.example.org" in check.config_summary()
+    assert "**app:** https://app.wiz.io" in _check().config_summary()
+
+
 # --- What is read, and which control keys a line (ADR-0004) -------------------------
 
 
@@ -746,7 +962,7 @@ def test_a_configuration_rules_issue_is_filed_under_its_parent_control(monkeypat
     assert (record["control_id"], record["control_name"]) == ("wc-3", "Parent control")
     high = _high(run_check(check, measurements=readings))
     assert [entry.slug for entry in high.reason_entries] == ["wiz-control-wc-3"]
-    assert high.reason_texts[0].startswith("[**Parent control**](")
+    assert high.reason_texts[0].startswith("**Parent control** — [**db-1**](")
 
 
 def test_the_ignore_list_skips_a_configuration_rules_issue_by_its_parent_control(
@@ -847,11 +1063,13 @@ def test_an_issue_reading_carries_exactly_what_its_line_says(monkeypatch):
     issue = _issue("CRITICAL", control_id="wc-9", name="Open port", entity="vm-1",
                    issue_id="u-1")
     issue["status"] = "IN_PROGRESS"
+    issue["createdAt"] = "2026-09-01T12:00:00.123456Z"
     reading = _readings(_check(), FakeWiz([issue]), monkeypatch)[1]
     assert reading.record == {
         "kind": "issue", "id": "u-1", "severity": "CRITICAL",
         "status": "IN_PROGRESS", "control_id": "wc-9", "control_name": "Open port",
-        "entity_name": "vm-1", "entity_type": "BUCKET"}
+        "entity_name": "vm-1", "entity_type": "BUCKET",
+        "created": {"at": "2026-09-01T12:00:00.123456Z"}, "due": {"at": None}}
 
 
 def test_no_issue_names_a_subject_so_none_has_a_history(monkeypatch):
@@ -871,7 +1089,7 @@ def test_a_value_wiz_did_not_send_is_null_and_never_missing(monkeypatch):
     assert reading.record == {
         "kind": "issue", "id": None, "severity": "HIGH", "status": None,
         "control_id": None, "control_name": None, "entity_name": None,
-        "entity_type": None}
+        "entity_type": None, "created": {"at": None}, "due": {"at": None}}
 
 
 def test_the_estate_is_the_object_this_check_declared(monkeypatch):
@@ -1076,9 +1294,10 @@ def test_every_entity_level_line_carries_the_reading_it_was_made_from(monkeypatc
     assert {entry.subject for entry in high.reason_entries} == {""}
 
 
-def test_a_control_line_carries_a_reading_only_when_one_issue_made_it(monkeypatch):
-    """A line made from several readings carries none, since no one record is what
-    it read."""
+def test_a_control_line_carries_no_reading_however_many_issues_made_it(monkeypatch):
+    """ADR-0003 decision 6: a control's line carries no record, made from several
+    issues or from one, so that it has one shape whatever its count; an issue's line
+    carries its own."""
     check = _check()
     readings = _readings(check, FakeWiz([
         _issue("HIGH", control_id="wc-1", issue_id="a", entity="db-1"),
@@ -1089,7 +1308,10 @@ def test_a_control_line_carries_a_reading_only_when_one_issue_made_it(monkeypatc
                 if child.name == "high")
     several, one = high.reason_entries
     assert several.data is None
-    assert one.data == dict(readings[3].record)
+    assert one.data is None
+    alone = _high(run_check(_check(aggregation_level="entity"),
+                            measurements=readings)).reason_entries[2]
+    assert alone.data == dict(readings[3].record)
 
 
 def test_a_name_past_the_budget_is_clipped_once_and_the_line_says_what_was_kept(
@@ -1134,15 +1356,21 @@ def test_an_identifier_too_long_to_keep_is_a_digest_and_never_a_prefix(monkeypat
 
 def test_the_heaviest_issue_reading_fits_the_default_record_limit(monkeypatch):
     """ADR-0003 decision 7: every field is bounded, so no answer — however strange —
-    makes a record the seam refuses. This is the proof at the bound."""
-    emoji = "😀" * 400
-    issue = {"id": "i" * 500, "severity": emoji, "status": emoji,
-             "sourceRules": [{"__typename": "Control", "id": "c" * 500,
-                              "name": emoji}],
-             "entitySnapshot": {"name": emoji, "type": emoji}}
-    reading = _readings(_check(), FakeWiz([issue]), monkeypatch)[1]
-    assert None not in reading.record.values()     # every field read, none empty
-    assert len(json.dumps(reading.record).encode()) <= 2048
+    makes a record the seam refuses. This is the proof at the bound: every field
+    at it, in the character JSON escapes into the most bytes it can keep — an
+    identifier whole at 100 of them, a short field and a name clipped to theirs —
+    and both times at the longest a reading keeps one."""
+    quote, late = '"', "9999-12-31T23:59:59.999999+00:00"
+    issue = {"id": quote * 49, "severity": quote * 500, "status": quote * 500,
+             "createdAt": late, "dueAt": late,
+             "sourceRules": [{"__typename": "Control", "id": quote * 49,
+                              "name": quote * 500}],
+             "entitySnapshot": {"name": quote * 500, "type": quote * 500}}
+    record = _readings(_check(), FakeWiz([issue]), monkeypatch)[1].record
+    assert None not in record.values()             # every field read, none empty
+    assert record["id"] == record["control_id"] == quote * 49        # kept whole
+    assert record["created"] == record["due"] == {"at": "9999-12-31T23:59:59.999999Z"}
+    assert len(json.dumps(record).encode()) == 1915 <= 2048
 
 
 def test_the_grading_reads_the_readings_and_nothing_else(monkeypatch):
@@ -1306,6 +1534,8 @@ def test_the_client_asks_wizs_documented_query_for_the_two_types():
         build().issues(10)
     body = json.loads(opener.requests[1].data)
     assert re.search(r"\{\s*issues:\s*issuesV2\(", body["query"])
+    assert re.search(r"nodes \{\s*id\s+severity\s+status\s+createdAt\s+dueAt\s",
+                     body["query"])
     assert body["variables"] == {
         "first": 10,
         "filterBy": {"status": ["OPEN", "IN_PROGRESS"],
@@ -1324,8 +1554,9 @@ def test_a_documented_answer_reads_through_to_its_line(monkeypatch):
         result = run_check(check)
     critical = next(child for child in result.children if child.name == "critical")
     assert [entry.slug for entry in critical.reason_entries] == ["wiz-control-wc-1"]
-    assert critical.reason_texts[0].startswith("[**Public bucket**](")
-    assert critical.reason_texts[0].endswith(" — **bucket-a** (bucket)")
+    assert critical.reason_texts[0].startswith(
+        "**Public bucket** — [**bucket-a**](https://app.wiz.io/issues#")
+    assert critical.reason_texts[0].endswith(") (bucket)")
 
 
 def test_a_plain_500_is_retried_now():

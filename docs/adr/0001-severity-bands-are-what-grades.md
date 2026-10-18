@@ -1,7 +1,7 @@
 # ADR-0001 — A tenant's issues are graded as severity bands
 
 - **Status:** Accepted
-- **Date:** 2026-09-27 (accepted 2026-08-15) — the decisions are the port's and are already in the code;
+- **Date:** 2026-10-17 (accepted 2026-08-15) — the decisions are the port's and are already in the code;
   this record is where they are written down for the people who receive it
 - **Related:** little-sister **ADR-0036** (addressable members — what makes a band's
   line separately pinnable), little-sister **ADR-0050** (a slug is an identifier,
@@ -75,9 +75,13 @@ That is the decision with the longest reach, because **a key is stored somewhere
 in a deployment's maintenance pins, written against names this package publishes. Keying
 on text would silently re-point every pin the first time a line was worded better;
 keying on position would re-point them whenever WIZ returned the same issues in a
-different order, which it may do at any time. An issue that arrives with no id has
-nothing stable to key on and falls back to little-sister's content hash — a worse
-identity, and still not a position.
+different order, which it may do at any time. An issue that arrives with no id is keyed
+by what it is about: the content hash of its record's `control_id`, `entity_type` and
+`entity_name`, and not of its text, which a deployment's `display:` block may re-word
+([ADR-0005](0005-an-issues-line-is-written-from-a-form.md) §5). No wording moves it, and
+nor does a change of the issue's status or severity; another control or another entity
+is another key. It is a worse identity than one WIZ minted, and still not a position —
+and since WIZ's API always sends an issue's id, it is a guard.
 
 The issues are asked of WIZ's `issuesV2`
 ([ADR-0004](0004-the-issues-are-asked-of-issuesv2.md)), and the control is the one an

@@ -19,6 +19,12 @@ that line, and the other nineteen keep reporting. The parts are identifiers the
 provider minted, never the rendered text and never a position (little-sister
 ADR-0050).
 
+**What a line says** is little-sister's to write (its ADR-0126): an issue's line is
+written from the form ``issue`` over the issue's record, and a deployment's
+``display:`` block re-words it with no release of this package. A control's line is
+made from every issue of one control, says them as a sentence of this module's and
+carries no record; each entity on it links to its own issue in WIZ.
+
 Registered in little-sister's ``CHECK_TYPES`` on import — importing
 ``little_sister_wiz`` is the one line a deployment's ``wsgi.py`` adds, before
 ``little_sister.app``, so the ``wiz`` type is known when the engine loads the check
@@ -45,7 +51,7 @@ import time
 import urllib.parse
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -86,6 +92,10 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 TOKEN_URL = "https://auth.app.wiz.io/oauth/token"
+
+#: Where WIZ's app answers, which every link a line carries is built on: WIZ's own
+#: address unless a configuration names another in `app_url:`.
+APP_URL = "https://app.wiz.io"
 AGGREGATION_LEVELS = ("id", "entity")
 DEFAULT_AGGREGATION_LEVEL = "id"
 
@@ -158,8 +168,8 @@ SUBNODES: dict[str, dict[str, str]] = {
 # important fact that a line is individually pinnable.
 ENTRY_NOTES = {
     "id": (
-        "Each line is one WIZ **control**, linked to one concrete WIZ issue ID and "
-        "followed by every affected entity and its kind. A finding marked "
+        "Each line is one WIZ **control**, followed by every entity it flagged and "
+        "that entity's kind, each linked to its own issue in WIZ. A finding marked "
         "*in progress* is already being worked on in WIZ. Because the line carries "
         "the control ID, each control is separately addressable: put **that one "
         "line** into maintenance while you work on it and the rest of the band "
@@ -167,14 +177,75 @@ ENTRY_NOTES = {
     ),
     "entity": (
         "Each line is one WIZ issue: the **affected entity** and its kind, then "
-        "the control that flagged it, linked into WIZ. A line marked *in progress* "
-        "is already being worked on in WIZ. Because a WIZ issue carries its own "
+        "the control that flagged it, linked into WIZ, and when WIZ detected it — "
+        "and when it is due, where an SLA gives it a date. A line marked "
+        "*in progress* is already being worked on in WIZ. Because a WIZ issue "
+        "carries its own "
         "ID, each line is separately addressable: put **that one line** into "
         "maintenance while you work on it and the rest of the band keeps reporting."
     ),
 }
 # Backwards-compatible name for callers that display the default band's note.
 ENTRY_NOTE = ENTRY_NOTES[DEFAULT_AGGREGATION_LEVEL]
+
+#: **What a line says** (little-sister ADR-0126). An issue's line is written from the
+#: form ``issue``, over the issue's record and the words its grading hands over, and a
+#: deployment re-words it in its check's ``display:`` block, keyed by that name, which
+#: the line's page shows beside it. A control's line is made from every issue of one
+#: control, carries no record and keeps its sentence (ADR-0003 decision 6). The names
+#: are **stored keys**: a deployment's template names them, so renaming one is a
+#: breaking change, said at the top of the release notes.
+LINE_FORMS: dict[str, dict[str, str]] = {
+    "issue": {
+        "sentence": "One WIZ issue: the entity it affects and that entity's kind, "
+                    "then the control that flagged it, linked to the issue in WIZ, "
+                    "and when WIZ detected it and when it is due.",
+        "text": "{?entity_name:**{entity_name}**{? ({line.kind})} — }"
+                "[{line.control}]({line.url}){?, detected {created.at}}"
+                "{?, due {due.at}}{?line.in_progress: · *in progress*}"},
+}
+
+#: The words an issue's grading hands over with its line: what it derives from the
+#: record, built when the line is written and never stored (little-sister ADR-0126
+#: decision 2), so that the record stays as WIZ sent it and holds no fact twice.
+LINE_WORDS: dict[str, dict[str, object]] = {
+    "kind": {"sentence": "The affected entity's kind, as a reader says it.",
+             "example": "storage bucket"},
+    "in_progress": {"sentence": "The issue is in progress in WIZ.",
+                    "example": True},
+    "url": {"sentence": "The issue's page in the WIZ app, on `app_url`, where it is "
+                        "set in progress or ignored.",
+            "example": "https://app.wiz.io/issues#~(filters~(status~(equals~(~'OPEN"
+                       "~'IN_PROGRESS))~severity~(equals~(~'HIGH)))~issue~'"
+                       "5f0c2a1e-0000-4000-8000-000000000000)"},
+    "control": {"sentence": "The control that flagged the issue: its name, or its id "
+                            "where it has none.",
+                "example": "Publicly exposed storage bucket"},
+}
+
+#: The fields of an issue's record a template may name.
+LINE_FIELDS: dict[str, dict[str, object]] = {
+    "id": {"sentence": "The issue's id, as WIZ minted it.",
+           "example": "5f0c2a1e-0000-4000-8000-000000000000"},
+    "severity": {"sentence": "The issue's severity, as WIZ spells it.",
+                 "example": "HIGH"},
+    "status": {"sentence": "The issue's status, OPEN or IN_PROGRESS.",
+               "example": "OPEN"},
+    "control_id": {"sentence": "The id of the control that flagged the issue.",
+                   "example": "wc-id-1234"},
+    "control_name": {"sentence": "The name of the control that flagged the issue.",
+                     "example": "Publicly exposed storage bucket"},
+    "entity_name": {"sentence": "The name of the entity the issue affects.",
+                    "example": "bucket-a"},
+    "entity_type": {"sentence": "The kind of the entity the issue affects, as WIZ "
+                                "spells it.",
+                    "example": "STORAGE_BUCKET"},
+    "created.at": {"sentence": "When WIZ detected the issue.",
+                   "example": "2026-09-01T12:00:00.123456Z"},
+    "due.at": {"sentence": "When the issue is due, where the tenant's SLA rules give "
+                           "it a date.",
+               "example": "2026-10-15T02:00:00Z"},
+}
 
 # Standard WIZ severities, worst first. This is the order the bands render in.
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "informational")
@@ -283,9 +354,11 @@ MAX_FIRST = 1000
 
 # WIZ's documented query (*Get Risk Issues*, ``IssuesTable``) under WIZ's own
 # ``issues:`` alias, so the answer is ``data.issues.nodes`` as it always was. Trimmed
-# to what a line reads: the id, the severity and the status; the Controls and the
-# configuration rules among the rules that raised the issue, a configuration rule by
-# its parent control; and the affected entity (ADR-0004 decision 1).
+# to what a line reads: the id, the severity and the status; when WIZ detected the
+# issue and when it is due, where the tenant's SLA rules give it a date; the Controls
+# and the configuration rules among the rules that raised the issue, a configuration
+# rule by its parent control; and the affected entity (ADR-0004 decision 1 and its
+# update).
 _ISSUES_QUERY = """
 query IssuesTable($filterBy: IssueFilters, $first: Int, $orderBy: IssueOrder) {
   issues: issuesV2(filterBy: $filterBy, first: $first, orderBy: $orderBy) {
@@ -293,6 +366,8 @@ query IssuesTable($filterBy: IssueFilters, $first: Int, $orderBy: IssueOrder) {
       id
       severity
       status
+      createdAt
+      dueAt
       sourceRules {
         __typename
         ... on Control { id name }
@@ -341,13 +416,39 @@ def _fault_and_wait(response: Response) -> tuple[Fault, float | None]:
     return fault_for(response.status), asked
 
 
-def _issue_link(issue_id: str, severity: str) -> str:
-    """The WIZ app deep-link for one issue (ported from the original)."""
+def _issue_link(app_url: str, issue_id: str, severity: str) -> str:
+    """The WIZ app's page for one issue, on ``app_url``: the issue opened over the
+    list of the open and in-progress issues of its severity (ported from the
+    original), its panel being where a reader sets it in progress or ignores it —
+    and nothing where WIZ sent no id."""
     if not issue_id:
         return ""
     sev = severity.upper()
-    return ("https://app.wiz.io/issues#~(filters~(status~(equals~(~'OPEN~'IN_PROGRESS))"
+    return (f"{app_url}/issues#~(filters~(status~(equals~(~'OPEN~'IN_PROGRESS))"
             f"~severity~(equals~(~'{sev})))~issue~'{issue_id})")
+
+
+def _app_url(value: object) -> str:
+    """The app's address as every link is built on it — an http(s) URL with a host
+    and nothing after its path, without a trailing slash — or a refusal at load
+    that says so. Refused rather than taken: a link on an address no browser opens
+    would leave every line's words standing without one, and nothing would say why."""
+    refusal = ("wiz 'app_url' must be the http(s) address of the WIZ app the lines "
+               "link into, such as https://app.wiz.io")
+    if not isinstance(value, str):
+        raise CheckError(refusal)
+    text = value.strip().rstrip("/")
+    if not text or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127
+                       for ch in text):
+        raise CheckError(refusal)
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError as error:
+        raise CheckError(refusal) from error
+    if (parts.scheme.lower() not in ("http", "https") or not parts.netloc
+            or parts.query or parts.fragment):
+        raise CheckError(refusal)
+    return text
 
 
 def _parse_aggregation_level(value: object) -> str:
@@ -451,6 +552,30 @@ def _control_of(issue: Mapping[str, Any]) -> Mapping[str, Any]:
     return named[0] if named else {}
 
 
+def _instant(value: object) -> str | None:
+    """A time WIZ sent, as a reading keeps it under ``at``, the name little-sister
+    reads as an instant (its ADR-0082): in UTC to the microsecond, the form WIZ
+    sends — and ``None`` where WIZ sent none, or something that is not an ISO-8601
+    time with an offset.
+
+    Parsed here rather than passed through, as `little-sister-github` parses its
+    times: a value under ``at`` that is not an instant has the library refuse the
+    whole result, every band of the run, where a time WIZ got wrong should cost
+    that time and nothing else. And written out again in one form, so that the
+    reading is bounded however WIZ spells it (ADR-0003 decision 7); a time an
+    offset would carry past the calendar's end is none.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+        if moment.tzinfo is None:
+            return None
+        return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    except (ValueError, OverflowError):
+        return None
+
+
 def _issue_reading(issue: Mapping[str, Any]) -> Measurement:
     """One issue as the grading will read it: exactly what its line says, and
     nothing else (ADR-0003 decision 1). It names no subject — an issue has no
@@ -473,6 +598,8 @@ def _issue_reading(issue: Mapping[str, Any]) -> Measurement:
         "control_name": _kept(control.get("name")),
         "entity_name": _kept(entity.get("name")),
         "entity_type": _short(entity.get("type")),
+        "created": {"at": _instant(issue.get("createdAt"))},
+        "due": {"at": _instant(issue.get("dueAt"))},
     })
 
 
@@ -547,108 +674,66 @@ def _estate_subject(api_url: str, client_id_ref: str) -> str:
     return f"{host};credential={client_id_ref}"
 
 
-def _entity_text(record: Mapping[str, Any]) -> str:
-    """Render one affected entity without adding another WIZ link."""
-    name = str(record["entity_name"] or "")
-    kind = str(record["entity_type"] or "").replace("_", " ").lower()
-    issue_id = str(record["id"] or "")
+def _kind(entity_type: object) -> str | None:
+    """An entity's kind as a reader says it — ``STORAGE_BUCKET`` as *storage
+    bucket* — and ``None`` where WIZ named none."""
+    return str(entity_type or "").replace("_", " ").lower() or None
 
-    if name:
-        text = f"**{plain(name)}**"
-        if kind:
-            text += f" ({plain(kind)})"
-    else:
-        text = f"WIZ issue {plain(issue_id)}" if issue_id else "WIZ issue"
-    if str(record["status"] or "").upper() == "IN_PROGRESS":
+
+def _in_progress(record: Mapping[str, Any]) -> bool:
+    """Whether WIZ has the issue in progress (ADR-0001 decision 7)."""
+    return str(record["status"] or "").upper() == "IN_PROGRESS"
+
+
+def _issue_slug(record: Mapping[str, Any]) -> str:
+    """An issue's key: its id, which WIZ mints with it — and where WIZ sent none,
+    little-sister's content hash of **what the issue is about**, the control that
+    flagged it and the entity it affects as its record holds them (ADR-0001
+    decision 3). Never of its text, which a deployment's template re-words and this
+    package's own wording may change, so that no wording moves a pin held on it; and
+    not of its status or severity, which change without it becoming another issue.
+    WIZ's API always sends an id, so this is a guard."""
+    issue_id = str(record["id"] or "")
+    if issue_id:
+        return slug("wiz", issue_id)
+    about = json.dumps([record["control_id"], record["entity_type"],
+                        record["entity_name"]], separators=(",", ":"))
+    return derived_slug(about)
+
+
+def _entity_text(record: Mapping[str, Any], severity: str, app_url: str) -> str:
+    """One affected entity on a control's line, **linked to its own issue**: its name
+    and its kind, or *WIZ issue* and the issue's id where WIZ named no entity, and
+    *in progress* where WIZ has the issue so."""
+    name = str(record["entity_name"] or "")
+    issue_id = str(record["id"] or "")
+    label = (f"**{plain(name)}**" if name
+             else f"WIZ issue {plain(issue_id)}" if issue_id else "WIZ issue")
+    link = _issue_link(app_url, issue_id, severity)
+    text = f"[{label}]({link})" if link else label
+    kind = _kind(record["entity_type"])
+    if name and kind:
+        text += f" ({plain(kind)})"
+    if _in_progress(record):
         text += " · *in progress*"
     return text
 
 
-def _issue_entry(record: Mapping[str, Any], severity: str) -> Entry:
-    """Render one entity-level issue as its line.
+def _control_entry(control_id: str, records: Sequence[Mapping[str, Any]],
+                   severity: str, app_url: str) -> Entry:
+    """One control's line, made from every issue of it in the band: the control's
+    name, then each entity it flagged, **each linked to its own issue** — every issue
+    one click from the line, where it is set in progress or ignored in WIZ. The
+    control's name links nowhere: it led to one of the issues as if it were all.
 
-    The text leads with the affected entity, because that is the thing an engineer
-    has to change. The control that flagged it follows and carries the deep link. The
-    earlier wording led with the control, which read as a policy name and left the
-    actual subject, often a bare resource ID, trailing after a dash. The entity kind
-    comes from the payload and makes a resource ID legible.
-
-    The line is made from one reading, so it carries it: the issue's record is the
-    line's ``data`` (ADR-0003 decision 6).
-    """
-    control_name = str(record["control_name"] or record["control_id"] or "issue")
-    name = str(record["entity_name"] or "")
-    kind = str(record["entity_type"] or "").replace("_", " ").lower()
-    issue_id = str(record["id"] or "")
-
-    flagged = f"[{plain(control_name)}]({_issue_link(issue_id, severity)})" \
-        if issue_id else plain(control_name)
-    if name:
-        affected = f"**{plain(name)}**"
-        if kind:
-            affected += f" ({plain(kind)})"
-        text = f"{affected} — {flagged}"
-    else:
-        text = flagged
-    if str(record["status"] or "").upper() == "IN_PROGRESS":
-        text += " · *in progress*"
-    # Without an ID there is nothing stable to key on, so fall back to
-    # little-sister's content hash rather than to a position (little-sister ADR-0036).
-    return Entry(slug("wiz", issue_id) if issue_id else derived_slug(text), text,
-                 data=dict(record))
-
-
-def _control_entry(control_id: str, records: list[Mapping[str, Any]],
-                   severity: str) -> Entry:
-    """Render one control-level aggregate with one representative WIZ link.
-
-    A line made from **one** issue carries that issue's reading; a line made from
-    several carries none, because no one record is what it read (ADR-0003
-    decision 6)."""
+    A sentence of this module's, carrying no record however many issues made it
+    (ADR-0003 decision 6): its list of links is what no template writes, and a line
+    with one shape whatever its count is what a deployment's template could not
+    keep while a second issue joined the first."""
     control_name = str(records[0]["control_name"] or control_id)
-    issue_id = ""
-    for record in records:
-        issue_id = str(record["id"] or "")
-        if issue_id:
-            break
-
-    control_text = f"**{plain(control_name)}**"
-    if issue_id:
-        control_text = f"[{control_text}]({_issue_link(issue_id, severity)})"
-    affected = [_entity_text(record) for record in records]
-    text = f"{control_text} — {', '.join(affected)}"
-    return Entry(slug("wiz", "control", control_id), text,
-                 data=dict(records[0]) if len(records) == 1 else None)
-
-
-def _id_entries(records: list[Mapping[str, Any]], severity: str) -> list[Entry]:
-    """Group one severity band's issues by WIZ ``control.id``.
-
-    A missing control ID gets its own issue-level bucket. Missing IDs must not share
-    an empty-string bucket because that would merge unrelated findings and move a
-    maintenance pin onto the wrong work.
-    """
-    buckets: list[tuple[str | None, list[Mapping[str, Any]]]] = []
-    positions: dict[str, int] = {}
-    for record in records:
-        control_id = str(record["control_id"] or "")
-        if not control_id:
-            buckets.append((None, [record]))
-            continue
-        position = positions.get(control_id)
-        if position is None:
-            positions[control_id] = len(buckets)
-            buckets.append((control_id, [record]))
-        else:
-            buckets[position][1].append(record)
-
-    entries: list[Entry] = []
-    for bucket_control_id, grouped in buckets:
-        if bucket_control_id is None:
-            entries.append(_issue_entry(grouped[0], severity))
-        else:
-            entries.append(_control_entry(bucket_control_id, grouped, severity))
-    return entries
+    affected = [_entity_text(record, severity, app_url) for record in records]
+    return Entry(slug("wiz", "control", control_id),
+                 f"**{plain(control_name)}** — {', '.join(affected)}")
 
 
 def _failed(failure: Mapping[str, Any]) -> CheckResult:
@@ -867,6 +952,7 @@ class WizCheck(Check):
     """Report open WIZ issues as severity-band leaves under the check's node."""
 
     def __init__(self, *, api_url: str, token_url: str = TOKEN_URL,
+                 app_url: str = APP_URL,
                  first: int = 500, severity_map: dict[str, StatusCode] | None = None,
                  ignore_control_ids: tuple[str, ...] = (),
                  aggregation_level: str = DEFAULT_AGGREGATION_LEVEL,
@@ -883,6 +969,7 @@ class WizCheck(Check):
         # Refused here as well as at load, so that a check built in code asks WIZ
         # for no page it would refuse either (ADR-0004 decision 5).
         first = _first(first)
+        app_url = _app_url(app_url)
         # The estate, declared here as little-sister ADR-0086 decision 4 asks, so a
         # run that raises is still recorded against the estate it failed to reach.
         # **Refused, never cut**, when it will not fit a subject, because a cut name
@@ -900,7 +987,8 @@ class WizCheck(Check):
         super().__init__(subject=subject,
                          subnode_defaults=_band_labels(severities),
                          label_tokens={"entry_note": ENTRY_NOTES[level]},
-                         **kwargs)
+                         line_forms=LINE_FORMS, line_words=LINE_WORDS,
+                         line_fields=LINE_FIELDS, **kwargs)
         # Resolved **once here** from the references the config's `secrets:`
         # block names (little-sister ADR-0023) — never re-read during a run. An
         # unresolvable reference leaves these empty and records the failure, and
@@ -909,6 +997,7 @@ class WizCheck(Check):
         self.client_secret = self.resolve_secret(client_secret_ref)
         self.api_url = api_url
         self.token_url = token_url
+        self.app_url = app_url
         self.first = first
         self.severity_map = severities
         self.ignore_control_ids = ignore_control_ids
@@ -931,6 +1020,7 @@ class WizCheck(Check):
         return {
             "api_url": str(api_url),
             "token_url": str(config.get("token_url", TOKEN_URL)),
+            "app_url": _app_url(config.get("app_url", APP_URL)),
             "first": _first(config.get("first", 500)),
             "severity_map": severity_map,
             "ignore_control_ids": tuple(str(i) for i in ignore),
@@ -946,6 +1036,7 @@ class WizCheck(Check):
     def config_summary(self) -> str:
         return config_markdown({
             "api": self.api_url,
+            "app": self.app_url,
             "aggregation": f"{self.aggregation_level} level",
             "grading": self._grading_summary(),
             "ignored controls": str(len(self.ignore_control_ids) or ""),
@@ -1076,6 +1167,47 @@ class WizCheck(Check):
         return [self._estate(bands=_band_counts(readings), page_full=page.more),
                 *readings]
 
+    def _issue_line(self, reading: Measurement, severity: str) -> Entry:
+        """One issue's line, written from the form ``issue`` over its record
+        (little-sister ADR-0126): the affected entity first, because that is the
+        thing an engineer has to change, and its kind, which makes a bare resource
+        id legible; then the control that flagged it, linked to the issue in WIZ.
+        The line carries the issue's record as its ``data`` (ADR-0003 decision 6)."""
+        record = reading.record
+        issue_id = str(record["id"] or "")
+        return self.line("issue", reading, slug=_issue_slug(record), words={
+            "kind": _kind(record["entity_type"]),
+            "in_progress": _in_progress(record) or None,
+            "url": _issue_link(self.app_url, issue_id, severity) or None,
+            "control": str(record["control_name"] or record["control_id"] or "")
+            or None})
+
+    def _id_lines(self, readings: Sequence[Measurement],
+                  severity: str) -> list[Entry]:
+        """One severity band's issues, grouped by WIZ ``control.id``.
+
+        A missing control ID gets its own issue-level bucket. Missing IDs must not
+        share an empty-string bucket because that would merge unrelated findings and
+        move a maintenance pin onto the wrong work.
+        """
+        buckets: list[tuple[str | None, list[Measurement]]] = []
+        positions: dict[str, int] = {}
+        for reading in readings:
+            control_id = str(reading.record["control_id"] or "")
+            if not control_id:
+                buckets.append((None, [reading]))
+                continue
+            position = positions.get(control_id)
+            if position is None:
+                positions[control_id] = len(buckets)
+                buckets.append((control_id, [reading]))
+            else:
+                buckets[position][1].append(reading)
+        return [self._issue_line(grouped[0], severity) if control_id is None
+                else _control_entry(control_id, [r.record for r in grouped],
+                                    severity, self.app_url)
+                for control_id, grouped in buckets]
+
     def grade(self, measurements: Sequence[Measurement],
               now: datetime) -> CheckResult:
         """The bands and their lines, from the readings alone (little-sister
@@ -1084,13 +1216,13 @@ class WizCheck(Check):
         says depends on when it is said.
         """
         estate: Mapping[str, Any] | None = None
-        issues: list[Mapping[str, Any]] = []
+        issues: list[Measurement] = []
         for measurement in measurements:
             kind = measurement.record.get("kind")
             if kind == "estate":
                 estate = measurement.record
             elif kind == "issue":
-                issues.append(measurement.record)
+                issues.append(measurement)
         if estate is None:
             # Only a failure record the engine wrote has no estate reading, and the
             # engine grades that run itself; this is the guard for a caller handing
@@ -1100,11 +1232,11 @@ class WizCheck(Check):
         if estate["failure"] is not None:
             return _failed(estate["failure"])
 
-        groups: dict[str, list[Mapping[str, Any]]] = {}
-        for record in issues:
-            if str(record["control_id"]) in self.ignore_control_ids:
+        groups: dict[str, list[Measurement]] = {}
+        for reading in issues:
+            if str(reading.record["control_id"]) in self.ignore_control_ids:
                 continue
-            groups.setdefault(band_of(record["severity"]), []).append(record)
+            groups.setdefault(band_of(reading.record["severity"]), []).append(reading)
 
         # Named `band_order` and not `order`: `order` is now a `CheckResult` field
         # meaning a node's rank, and one name for the build sequence and the
@@ -1124,9 +1256,9 @@ class WizCheck(Check):
             # `(slug, text)` pairs used to say by their shape. The configured
             # aggregation level decides whether a member is a control or one
             # concrete issue for an entity.
-            lines = (_id_entries(items, severity)
+            lines = (self._id_lines(items, severity)
                      if self.aggregation_level == "id"
-                     else [_issue_entry(record, severity) for record in items])
+                     else [self._issue_line(reading, severity) for reading in items])
             children.append(CheckResult(
                 code, lines, entries=True, name=severity,
                 description=f"{severity.capitalize()} WIZ issues",

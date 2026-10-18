@@ -1,7 +1,7 @@
 # ADR-0003 — A run is the tenant's exposure and its issues, and only the exposure has a history
 
 - **Status:** Accepted
-- **Date:** 2026-09-26
+- **Date:** 2026-10-17 (accepted 2026-09-26)
 - **Related:** [ADR-0001](0001-severity-bands-are-what-grades.md) (the bands, their
   lines and their slugs, which this keeps exactly),
   [ADR-0002](0002-a-read-failure-is-not-a-finding.md) (what a failed read means, which
@@ -12,7 +12,9 @@
   little-sister **ADR-0023** (a secret reference is a name), little-sister **ADR-0050**
   (an identifier is never invented from text), `little-sister-github` ADR-0014 (the
   first package through the split — its estate, its readings and its configuration
-  split, taken here in this vocabulary)
+  split, taken here in this vocabulary),
+  [ADR-0005](0005-an-issues-line-is-written-from-a-form.md) (an issue's line written
+  from a form, and a control's line that links every issue)
 
 > Every reference to one of little-sister's records is written out as **little-sister
 > ADR-00NN**, because the two numbering spaces overlap.
@@ -66,11 +68,18 @@ is set, the counts are a floor under the tenant's exposure rather than the whole
 
 ```
 {"kind": "issue", "id": "…", "severity": "CRITICAL", "status": "IN_PROGRESS",
- "control_id": "…", "control_name": "…", "entity_name": "…", "entity_type": "BUCKET"}
+ "control_id": "…", "control_name": "…", "entity_name": "…", "entity_type": "BUCKET",
+ "created": {"at": "2026-09-01T12:00:00.123456Z"}, "due": {"at": null}}
 ```
 
 — the values as WIZ sent them, bounded as decision 7 says, and **null** where WIZ sent
-nothing, so every reading has one shape (little-sister ADR-0085 decision 3). There is
+nothing, so every reading has one shape (little-sister ADR-0085 decision 3). Two are
+times: `created.at`, when WIZ detected the issue, and `due.at`, when it is due where the
+tenant's SLA rules give it a date
+([ADR-0004](0004-the-issues-are-asked-of-issuesv2.md) decision 1). Each is kept in UTC
+to the microsecond, the form WIZ sends, and is `null` where WIZ sent none or something
+that is not an ISO-8601 time with an offset — which under `at` would have the library
+refuse the whole result. There is
 one reading per issue on the page, in the order WIZ returned them, the ignored ones
 included (decision 2).
 
@@ -141,8 +150,8 @@ estate's curve would otherwise buy a series for every open finding with it. Find
 churn, and a resolved finding's series is never trimmed by its count: it waits for the
 ceiling on everything held, where each eviction turns the engine's node red
 (little-sister ADR-0087 decision 10). And WIZ keeps an issue's lifecycle itself.
-`little-sister-github` decided its findings the same way (its ADR-0014 §2), and granting
-a history later is additive: a subject on a reading that already exists.
+little-sister-github ADR-0014 §2 decided that package's findings the same way, and
+granting a history later is additive: a subject on a reading that already exists.
 
 ### 4. The estate names the state it is in
 
@@ -195,16 +204,19 @@ The node rolls up to exactly what it did, with one exception: when every band is
 nothing under it is counted, and it reads `MAINTENANCE` where it read `OK`. A failed read
 still declares its `WARN` or `ERROR` with its sentence, and writes no band.
 
-### 6. A line made from one reading carries it
+### 6. An issue's line carries its reading, and a control's line carries none
 
 `little-sister-github` ADR-0014 §7's rule: a line the grading writes out of **one**
 reading carries that reading's record as its `data`, and a line written out of several
-carries none, since no one record is what it read. So at `aggregation_level: entity`
-every line carries its issue, and at `id` a control's line carries its issue when one
-issue made it and nothing when several did. An issue names no subject, so neither does
-its line. The bands' lines carry no code of their own — the band does — so a band says
-`entries=True`, which keeps each line a member a pin can hold, as the `(slug, text)`
-pairs said by their shape.
+carries none, since no one record is what it read. So an issue's line carries its issue
+— every line at `aggregation_level: entity`, and at `id` the line of an issue whose
+rules name no control. **A control's line carries none**, however many issues made it,
+one among them ([ADR-0005](0005-an-issues-line-is-written-from-a-form.md) §3): it has
+one shape whatever its count, and a deployment's template, which re-words an issue's
+line, could not have kept one made from one issue while a second joined. An issue names
+no subject, so neither does its line. The bands' lines carry no code of their own — the
+band does — so a band says `entries=True`, which keeps each line a member a pin can
+hold, as the `(slug, text)` pairs said by their shape.
 
 ### 7. Free text is clipped once, and every field is bounded
 
@@ -215,10 +227,11 @@ so a name longer than that is shorter on its line than it was, and the sentence 
 today can always be written again from the reading. A severity, a status and an entity's
 kind are held to 100 bytes; an identifier is kept whole, or, past 100 bytes, as
 `sha256:` and 32 hex digits of it, because a clipped identifier could meet another one
-and a digest cannot. WIZ mints all of these short — an issue's id is a UUID — so these
-bounds are not met in practice. They exist so that no answer makes a record the seam
-refuses: the heaviest issue reading possible, every field at its bound in the characters
-JSON escapes the most, weighs 1819 bytes against the default 2048.
+and a digest cannot; and a time, written out in its one form, is at most 29 bytes. WIZ
+mints all of these short — an issue's id is a UUID — so these bounds are not met in
+practice. They exist so that no answer makes a record the seam refuses: the heaviest
+issue reading possible, every field at its bound in the characters JSON escapes the
+most, weighs 1915 bytes against the default 2048.
 
 **One record can still be refused**, and it is stated rather than engineered away: an
 estate whose answer invents so many severities that its counts pass `record_limit`.
@@ -241,7 +254,9 @@ WIZ's severities are five.
 - **Lines carry what they read.** At `aggregation_level: entity` every line carries its
   issue's record — about 200 to 350 bytes of JSON with ordinary names — in the tree and in
   every envelope a client polls, so five hundred open issues are some 150 KB more per
-  poll. At `id` only a control with one affected entity carries one.
+  poll. At `id` only the line of an issue whose rules name no control carries one:
+  a control's line carries none, so one made from one issue has no `data` in the
+  envelope.
 - **The records' field names are keys now**, as a slug is: a deployment's line template
   or grading will read them, so renaming one breaks what this package cannot see. They
   are the ones in decision 1.

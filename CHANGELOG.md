@@ -11,6 +11,60 @@ the code says so.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-18
+
+**An issue's line is written from a form, and a deployment may re-word it.**
+little-sister writes each issue's line from the form `issue`, over the issue's record,
+and a check's `display:` block re-words it in its own file with no release of this
+package; the README's *What its lines say* names the form, its words and its fields.
+As shipped, it says what it said, and when WIZ detected the issue and when it is due.
+Those names are **stored keys** from this release on: renaming one will be said here as
+a breaking change. It installs only beside little-sister 0.3.21 or newer, the release
+that writes a line from a form, so a deployment moves the two pins together
+(*Requires*).
+
+**Each entity on a control's line links to its own issue.** At the default
+`aggregation_level: id` the control's name linked to one of the line's issues as if it
+were all of them; it links nowhere now, and each entity links to its issue, so every
+issue is one click from the line, where it is set in progress or ignored in WIZ. The
+text of every control's line moves once. No slug moves but that of an issue WIZ sent
+without an id, which its API does not do (*Changed*).
+
+### Added
+
+- `app_url`, the WIZ app's address every link is built on — `https://app.wiz.io` by
+  default. One that is not an http(s) URL with a host, or that carries a query or a
+  fragment, refuses to load ([ADR-0005](docs/adr/0005-an-issues-line-is-written-from-a-form.md)).
+- The form `issue`, its four words — `kind`, `in_progress`, `url`, `control` — and the
+  nine fields of an issue's record a template may name: `id`, `severity`, `status`,
+  `control_id`, `control_name`, `entity_name`, `entity_type`, `created.at`, `due.at`.
+  `/system/installed` lists each with its sentence and an example.
+- An issue's record keeps when WIZ detected the issue, `created.at`, and when it is due,
+  `due.at`, where the tenant's SLA rules give it a date — asked of WIZ as `createdAt` and
+  `dueAt`, which answered the same issues with nothing else in the answer moving
+  ([ADR-0004](docs/adr/0004-the-issues-are-asked-of-issuesv2.md)).
+
+### Changed
+
+- A control's line carries no record, made from one issue or from several, where one
+  made from one issue carried that issue's: it has one shape whatever its count
+  ([ADR-0003](docs/adr/0003-a-run-is-the-exposure-and-its-issues.md)). An issue's line
+  carries its own, as before.
+- An issue's line says when WIZ detected the issue and, where an SLA gives it a date,
+  when it is due — `, detected 2026-09-01 12:00:00, due 2026-10-15 02:00:00` before
+  *in progress*, on the configured clock — and `—` for a control with neither a name
+  nor an id, where it said `issue`; the rest of it is word for word.
+- An issue WIZ sent without an id is keyed by the content hash of its control and its
+  entity, where its text was hashed, so that no wording moves its slug; the slug of such
+  an issue moves once ([ADR-0001](docs/adr/0001-severity-bands-are-what-grades.md)).
+
+### Requires
+
+- **`little-sister >= 0.3.21`**, up from 0.3.18: the first release that writes a line
+  from a form — `Check.line` and the `line_forms` a type declares — which every issue's
+  line is now written through, and which no earlier release has. Still a **floor, never a
+  pin**.
+
 ## [0.1.3] - 2026-09-27
 
 **Breaking: this package speaks check API epoch 3, and needs the little-sister release

@@ -11,7 +11,7 @@ band keeps reporting.
 
 ## The contract
 
-- **Requires** `little-sister >= 0.3.18` — a floor, never a pin.
+- **Requires** `little-sister >= 0.3.21` — a floor, never a pin.
 - **Runs on** Python **3.11 or newer** — the library's floor, not a higher
   one of its own.
 - **Registers** one check type: **`wiz`**.
@@ -24,7 +24,7 @@ band keeps reporting.
 # Pin them. A deployment names exact versions so an upgrade is a deliberate edit
 # rather than drift; a plugin is the one that declares a floor, because two plugins
 # that each pinned could not be installed together.
-dependencies = ["little-sister==0.3.18", "little-sister-wiz==0.1.3"]
+dependencies = ["little-sister==0.3.21", "little-sister-wiz==0.1.4"]
 ```
 
 ```python
@@ -73,9 +73,10 @@ One OAuth2 client-credentials token exchange, then one GraphQL query per run:
 | **Token** | `POST https://auth.app.wiz.io/oauth/token` (`token_url:` overrides it) |
 | **Issues** | `POST <api_url>` — `issuesV2(first: <first>)`, status `OPEN` and `IN_PROGRESS`, type `TOXIC_COMBINATION` and `CLOUD_CONFIGURATION`, ordered by severity |
 
-Each returned issue carries its id, severity and status, the rules that raised it — a
-Control's `id` and `name`, or a configuration rule's parent control — and the affected
-entity (`name`, `type`); nothing else is requested. The issues a Control or a
+Each returned issue carries its id, severity and status, when WIZ detected it and,
+where the tenant's SLA rules give it a date, when it is due (`createdAt`, `dueAt`), the
+rules that raised it — a Control's `id` and `name`, or a configuration rule's parent
+control — and the affected entity (`name`, `type`); nothing else is requested. The issues a Control or a
 configuration rule raised are read; a threat detection (`THREAT_DETECTION`, which a Wiz
 Defend license brings) is not
 ([ADR-0004](docs/adr/0004-the-issues-are-asked-of-issuesv2.md)).
@@ -83,13 +84,15 @@ Defend license brings) is not
 | Config | Decides |
 |---|---|
 | `severity_map` | what a band with findings grades as. Defaults: `critical` / `high` / `medium` → **ERROR**, `low` → **WARN**, `informational` → **OK**. An empty band is always OK |
-| `aggregation_level` | `id` (default) — one line per WIZ **control**, listing every affected entity, slugged `wiz-control-<control-id>`: a configuration rule's issue under the rule's parent control, and an issue whose rules name several controls under the one with the smallest id; `entity` — one line per issue, slugged `wiz-<issue-id>` |
+| `aggregation_level` | `id` (default) — one line per WIZ **control**, listing every affected entity, each linked to its own issue, slugged `wiz-control-<control-id>`: a configuration rule's issue under the rule's parent control, and an issue whose rules name several controls under the one with the smallest id; `entity` — one line per issue, slugged `wiz-<issue-id>` |
 | `ignore_control_ids` | WIZ control IDs to skip entirely |
+| `app_url` | the WIZ app's address every link on a line is built on — `https://app.wiz.io` by default; one that is not an http(s) URL with a host refuses to load |
 | `first` | issues fetched per run, from 1 to 1000 — WIZ's limit for one query — and 500 by default. A single page, so raise it rather than expecting pagination; a value outside 1 to 1000 refuses to load |
 
 A band with findings takes its mapped status; the check's own node rolls up
-worst-of its bands. An issue with no id falls back to little-sister's content hash
-for its slug, never to a position in the list. The package has no dependency but
+worst-of its bands. An issue with no id falls back to little-sister's content hash of
+what it is about — its control and its entity — for its slug, never to its text or to
+a position in the list. The package has no dependency but
 little-sister itself, and TLS verification is always on — there is no setting to
 turn it off.
 
@@ -97,15 +100,51 @@ turn it off.
 
 Each run records what it read: one reading of the tenant's **exposure** — how many open
 issues each band holds, counted before `ignore_control_ids`, and whether the page was
-full — and then one reading per issue. Every line made from one issue carries that
-issue's record as its `data` (every line at `aggregation_level: entity`; a control's
-line at `id` only when one issue made it), so a line template or a client can read what
-the line read.
+full — and then one reading per issue. An issue's line carries that issue's record as
+its `data` — every line at `aggregation_level: entity`, and at `id` the line of an issue
+whose rules name no control — so a line template or a client can read what the line
+read; a control's line carries none, however many issues made it.
 
 `series_keep:` — little-sister's setting, **0 by default** — keeps the exposure's
 history: one record each time a band's count changes, or the read starts or stops
 failing, the oldest out. Issues keep none. Why it is shaped this way is
 [ADR-0003](docs/adr/0003-a-run-is-the-exposure-and-its-issues.md).
+
+## What its lines say
+
+An issue's line is written by little-sister from a **form** this package ships,
+`issue`, over the issue's record
+([ADR-0005](docs/adr/0005-an-issues-line-is-written-from-a-form.md)): the entity and its
+kind, then the control that flagged it, linked to the issue in WIZ, when WIZ detected
+it and, where the tenant's SLA rules give it a date, when it is due, and *in progress*
+where WIZ has it so — on a page,
+`db-1 (storage bucket) — Public bucket, detected 2026-09-01 12:00:00, due 2026-10-15 02:00:00 · in progress`,
+the control's name the link and each time on little-sister's configured clock. A
+control's line, at the default `aggregation_level`, is a sentence of this package's:
+the control's name, then every entity it flagged, each linked to its own issue, so
+that each is one click from the line, where it is set in progress or ignored in WIZ.
+
+A deployment re-words an issue's line in the check's own file, in a `display:` block
+keyed by `issue`, with no release of this package:
+
+```yaml
+display:
+  issue: "{line.control} on {entity_name} ({severity}){?line.in_progress: — being worked on}"
+```
+
+`{entity_name}` and `{severity}` are fields of the issue's record — `id`, `severity`,
+`status`, `control_id`, `control_name`, `entity_name`, `entity_type`, `created.at` and
+`due.at` — and
+`{line.control}` is a word the grading hands over with the line: the control's name, or
+its id where it has none. The other words are `{line.kind}`, the entity's kind as a
+reader says it, `{line.in_progress}`, a flag, and `{line.url}`, the issue's page in WIZ.
+`{? …}` is shown only where every value it names is there,
+`{?line.in_progress: …}` only where the issue is in progress as well, and a link is
+Markdown's, its target a field or a word. A value that is not there is `—`;
+`{line.default}` is the shipped text, so a template can add to it. A line's page names
+its form, and `/system/installed` lists it with its text, its words and its fields; a
+template that names what the type does not declare stops the start, naming the file.
+The notation is little-sister's (its ADR-0126).
 
 ## When WIZ is the one having a bad day
 
