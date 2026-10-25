@@ -11,6 +11,84 @@ the code says so.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-25
+
+**This release installs only beside little-sister 0.3.22 or newer**, the release in
+which a node says what it is on a card and at length in a handbook, so a deployment
+moves the two pins together (*Requires*).
+
+**Every band says what to do, its handbook says the rest, and every node links its
+issues in WIZ.** Nothing to edit. A band's `about` is a sentence of what to do when it
+holds issues, by the sign the band shows then under your `severity_map`, leading into
+the **handbook** every band shows on its *Handbook* tab, which holds what the `about`
+said at its end — how a line reads, and that each line can be pinned on its own — and
+the grading in force, what to do and the configuration. A band's description says what
+it reads, and its **details** link WIZ's list of its open issues, as the check's own
+node's link the tenant's (*Added*, *Changed*). The `about` no longer says how soon a
+severity is fixed: a deployment that wants *fix immediately* back writes it in its
+`subnodes:` block, after `{default}`.
+
+**On little-sister's wall the bands start as chips, and a band nothing waits on with its
+issues folded** — what the wall draws today, kept when little-sister's built-in look
+opens what nobody speaks for — **and a failing band's box shows ten lines** of its
+issues whatever `reason_cap` your `settings.yaml` says, the rest under its *⌄ all N*:
+four lines more than the library's default of six. Nothing to edit, and no name moves;
+a deployment that wants them open, or another budget for the bands, says so in the
+check's own file (*Changed*).
+
+### Added
+
+- **Each node links its issues in WIZ**, in its details (little-sister ADR-0133
+  decision 6): a band WIZ's list of the open and in-progress issues of its severity, and
+  the check's own node the tenant's whole list, on a run that failed as well — both on
+  `app_url`. WIZ's list holds what no band lists too: a threat detection, and an issue
+  of a control in `ignore_control_ids`.
+- **A handbook every band shows**, a Markdown file this package ships: what the bands
+  read; the grading in force, `{grading}`; how a line reads at the configured
+  `aggregation_level`, `{line_note}`; what to do with an issue in WIZ; the configuration
+  the check takes; and that each line can be pinned on its own, `{pin_note}`. A
+  deployment's text may name the three tokens, beside `{entry_note}`, the last two
+  together, as before.
+
+### Changed
+
+- **The bands start as chips, and a band nothing waits on folds its issues** — what this
+  type proposes of the wall's first look, in little-sister's keys (its ADR-0128). The
+  check's own node proposes its bands as chips, each with its count, and a band your
+  `severity_map` grades OK — `informational` as shipped — its issues folded behind
+  *✓ +N ok* wherever it is open, its own page among them; a band that fails opens its
+  way as little-sister opens a failure a chip would hide, its box ten lines of its
+  issues and the rest under its *⌄ all N* and on the band's page. The budget is the
+  type's, above the one `settings.yaml` gives every box. A deployment that wants the
+  bands open writes `chips: false` at the top of the check's file,
+  `children: {reason_cap: 20}` beside it for another budget, and `fold_ok: false` under
+  a band's name in its `subnodes:` block to show its issues; no name moves, so no pin
+  does
+  ([ADR-0006](docs/adr/0006-the-bands-start-as-chips-and-a-quiet-band-folds-its-lines.md)).
+- **A band's `about` says what to do, by the sign the band shows** — `{error}: open each
+  issue from its line and fix what WIZ found on the entity, setting the issue in
+  progress in WIZ meanwhile — or ignore it there with its reason`, and a link into the
+  handbook's section; for a band graded OK, as `informational` is, that nothing waits
+  on it. The sign is taken from `severity_map` as configured, so a band your map grades
+  WARN says `{warn}`, and a severity the map names that this package does not is
+  declared as the five are, with its `about` and the handbook — as is the band of a
+  severity WIZ invents, which nothing declares and whose run hands them over, at the
+  sign of the fallback grading, `{warn}`. What the `about` said until now is the
+  handbook's — how a line reads — or a deployment's policy — how soon a severity is
+  fixed.
+- A band's description says what it reads, *The open and in-progress WIZ issues of this
+  severity that a Control or a configuration rule raised.*, where it said *Critical WIZ
+  issues*.
+
+### Requires
+
+- **little-sister 0.3.22 or newer.** The floor rises from 0.3.21 because 0.3.22 is the
+  first release in which a run writes a node's details, a type declares a band's
+  handbook, and a label says a status by its sign and links a section of its node's
+  handbook (little-sister ADR-0133) — what every band's text and every node this check
+  writes are now made of. An older library cannot run it. Upgrade the library first; no
+  configuration changes with it.
+
 ## [0.1.4] - 2026-10-18
 
 **An issue's line is written from a form, and a deployment may re-word it.**

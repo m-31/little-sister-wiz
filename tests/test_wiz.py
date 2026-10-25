@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import re
 from datetime import UTC, datetime
 from email.message import Message
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -19,10 +21,8 @@ from running import measured, run_check
 from little_sister_wiz import wiz as mod_wiz
 from little_sister_wiz.wiz import (
     BAND_GLYPHS,
-    ENTRY_NOTE,
     RETRY_BACKOFF_SECONDS,
     SEVERITY_ORDER,
-    SUBNODES,
     IssuePage,
     WizCheck,
     WizClient,
@@ -47,9 +47,9 @@ class _Clock:
 
 
 def _about(band):
-    """The band's shipped `about` as the check renders it — `{entry_note}` is a
-    token the type expands, not literal text (little-sister ADR-0025)."""
-    return SUBNODES[band]["about"].replace("{entry_note}", ENTRY_NOTE)
+    """The band's shipped `about` as a check with no `subnodes:` block declares it,
+    under the map the type ships (little-sister ADR-0025)."""
+    return _check().subnode_labels[band]["about"]
 
 
 class FakeWiz:
@@ -331,13 +331,19 @@ def test_bands_declare_the_built_in_text(monkeypatch):
     Read off the check rather than off the result: since little-sister took the
     `subnodes:` block (its ADR-0025) this package **declares**
     these and the library resolves them — `subnode_labels` is that resolution, and
-    the engine writes it onto each band node. The `{entry_note}` token this package
-    declares beside the text has expanded by the time it lands there.
+    the engine writes it onto each band node. The tokens this package declares
+    beside the text have expanded by the time it lands there, the handbook's too.
     """
     check = _check()   # no subnodes configured
     _run(check, FakeWiz([_issue("CRITICAL")]), monkeypatch)
-    assert check.subnode_labels["critical"] == {
-        "title": band_glyph("critical"), "about": _about("critical")}
+    labels = check.subnode_labels["critical"]
+    assert set(labels) == {"title", "about", "handbook"}
+    assert labels["title"] == band_glyph("critical")
+    assert labels["about"] == (
+        "{error}: open each issue from its line and fix what WIZ found on the entity, "
+        "setting the issue in progress in WIZ meanwhile — or ignore it there with its "
+        "reason; [what to do](handbook#when-a-band-holds-issues).")
+    assert labels["handbook"].startswith("# WIZ issues by severity\n")
     assert check.subnode_labels["high"]["title"] == "🟠"
 
 
@@ -347,14 +353,16 @@ def test_a_declared_band_hands_over_no_label_of_its_own(monkeypatch):
     test while a deployment's override was the thing actually painting."""
     result = _run(_check(), FakeWiz([_issue("CRITICAL")]), monkeypatch)
     critical = next(c for c in result.children if c.name == "critical")
-    assert (critical.title, critical.about) == ("", "")
+    assert (critical.title, critical.about, critical.handbook) == ("", "", "")
 
 
 def test_config_replaces_a_band_label():
     check = _check(subnode_labels={
         "critical": {"title": "Sev-1", "about": "Page the on-call."}})
-    assert check.subnode_labels["critical"] == {
-        "title": "Sev-1", "about": "Page the on-call."}
+    labels = check.subnode_labels["critical"]
+    assert (labels["title"], labels["about"]) == ("Sev-1", "Page the on-call.")
+    # what it does not replace is the type's
+    assert labels["handbook"] == _check().subnode_labels["critical"]["handbook"]
     assert check.subnode_labels["high"]["about"] == _about("high")   # untouched
 
 
@@ -426,13 +434,15 @@ def test_a_severity_this_package_does_not_name_gets_a_question_mark(monkeypatch)
     assert band.title not in BAND_GLYPHS.values()
 
 
-def test_a_band_named_only_by_the_severity_map_declares_its_circle():
-    """A `severity_map` may name a severity this package writes no prose for. It
-    still gets a declaration — the glyph — so the band is labeled rather than
-    bare, and a deployment writing `{default}` into a title for it gets that
-    circle back rather than nothing."""
+def test_a_band_named_only_by_the_severity_map_is_declared_as_the_five_are():
+    """A `severity_map` may name a severity this package does not. It is declared as
+    the five are — the glyph, an about by the sign the map gives it, the handbook —
+    so the band is labeled rather than bare, and a deployment writing `{default}` into
+    a title for it gets that circle back rather than nothing."""
     check = _check(severity_map={"catastrophic": StatusCode.ERROR})
-    assert check.subnode_labels["catastrophic"] == {"title": "❓"}
+    assert check.subnode_labels["catastrophic"] == {
+        "title": "❓", "about": _about("critical"),
+        "handbook": check.subnode_labels["critical"]["handbook"]}
     extended = _check(severity_map={"catastrophic": StatusCode.ERROR},
                       subnode_labels={"catastrophic": {"title": "{default}!"}})
     assert extended.subnode_labels["catastrophic"]["title"] == "❓!"
@@ -459,6 +469,107 @@ def test_the_glyph_does_not_fold_away_against_the_name(monkeypatch):
     title = check.subnode_labels[critical.name]["title"]
     assert shown_title(critical.name, title) == "🔴"
     assert label_parts(critical.name, title) == ("critical", "🔴")
+
+
+# --- the first look (little-sister ADR-0128, ADR-0006) ------------------------------
+
+
+def _folded(check):
+    """The bands whose declaration folds their healthy lines (`fold_ok`)."""
+    return {band for band, said in check.type_statements.by_name.items()
+            if said.fold_ok}
+
+
+def test_the_bands_start_as_chips():
+    """The bands are a ladder of a handful of leaves, each read by its count, so the
+    check's own node proposes them as chips (ADR-0006): `node_defaults`, since a
+    band's name reaches the band and not the node it hangs beneath."""
+    own = _check().type_statements.own
+    assert (own.chips, own.fold_ok) == (True, None)
+
+
+def _band_lines(check, *, settings_cap=30, named_by_run=()):
+    """The line budget little-sister gives each band, the check's own box beside
+    them, under a `settings.yaml` that says ``settings_cap`` — the bands in
+    ``named_by_run`` named by a run alone."""
+    from dataclasses import replace
+
+    from little_sister.config import config
+    from little_sister.first_look import FirstLooks
+    looks = FirstLooks([check], {}, replace(config, reason_cap=settings_cap),
+                       lambda path: path.rsplit("/", 1)[-1] in named_by_run)
+    bands = {band: looks.look(f"/wiz/{band}").reason_cap
+             for band in ("critical", "high", "medium", "low", "informational",
+                          *named_by_run)}
+    return bands, looks.look("/wiz").reason_cap
+
+
+def test_a_failing_bands_box_shows_ten_lines():
+    """A band opens when it fails, by little-sister's failure budget, to say why it
+    is red: ten lines say it with its first few issues, and the rest stand under its
+    *⌄ all N* and on its page, where a deployment's thirty would stand the card several
+    issues deep in each failing band (ADR-0006 decision 3). The check's own node says
+    it of its children, so a band only WIZ's findings name takes it too, and the
+    check's own box keeps the deployment's budget."""
+    own = _check().type_statements.own
+    assert (own.children.chips, own.children.fold_ok, own.children.reason_cap) == (
+        None, None, 10)
+    bands, own_cap = _band_lines(_check(), named_by_run=("catastrophic",))
+    assert set(bands.values()) == {10}
+    assert own_cap == 30
+    # a deployment's budget smaller than ten leaves the bands the type's proposal
+    assert set(_band_lines(_check(), settings_cap=4)[0].values()) == {10}
+
+
+def test_a_band_nothing_waits_on_starts_with_its_lines_folded():
+    """`informational`'s issues ask for no work under the shipped map, so its lines
+    start folded behind *✓ +N ok* where it is open; a band the map grades WARN or ERROR
+    folds nothing, its lines being its work, and a band a deployment grades OK folds as
+    `informational` does — the about's own rule (ADR-0006)."""
+    assert _folded(_check()) == {"informational"}
+    assert _folded(_check(severity_map={"low": StatusCode.OK})) == {
+        "low", "informational"}
+    assert _folded(_check(severity_map={"informational": StatusCode.WARN})) == set()
+
+
+def test_no_band_proposes_a_look_for_children_it_does_not_have():
+    # a band's lines are its members, and it has no children to close or fold
+    for band, said in _check().type_statements.by_name.items():
+        assert (said.chips, said.children, said.reason_cap) == (None, None, None), band
+
+
+def test_the_library_reads_every_key_the_type_declares(caplog):
+    # a key it did not read would be named at every start and do nothing, in every
+    # installation (little-sister ADR-0128 decision 7)
+    caplog.set_level(logging.WARNING, logger="little_sister")
+    _check()
+    _check(severity_map={"catastrophic": StatusCode.ERROR})
+    assert not [record for record in caplog.records
+                if "does not read" in record.getMessage()]
+
+
+def test_a_deployment_takes_the_look_back_in_its_own_file(caplog):
+    """The README's lines: `chips: false` at the top of the check's file opens the
+    bands, `children: {reason_cap: 20}` beside it gives a band's box twenty lines, and
+    `informational: {fold_ok: false}` in its `subnodes:` block shows its lines. The
+    deployment's file is asked before the type (little-sister ADR-0128 decision 2),
+    and none is a key of this type's own."""
+    caplog.set_level(logging.WARNING, logger="little_sister")
+    check = WizCheck.from_config(
+        {"type": "wiz", "path": "/wiz",
+         "api_url": "https://api.example.app.wiz.io/graphql",
+         "secrets": {"client_id": "env://WIZ_CLIENT_ID",
+                     "client_secret": "env://WIZ_CLIENT_SECRET"},
+         "chips": False,
+         "children": {"reason_cap": 20},
+         "subnodes": {"informational": {"fold_ok": False}}}, Path("."))
+    said = check.file_statements
+    assert said.own.chips is False
+    assert said.by_name["informational"].fold_ok is False
+    assert set(_band_lines(check)[0].values()) == {20}
+    assert not [record for record in caplog.records
+                if "unknown key" in record.getMessage()
+                or "does not read" in record.getMessage()]
 
 
 def test_the_band_row_reads_worst_first_rather_than_alphabetically(monkeypatch):
@@ -508,18 +619,22 @@ def test_every_declared_band_carries_the_rank_its_constant_states():
 def test_no_shipped_band_text_claims_a_code():
     """The regression, and the reason this item existed. Every band's `about` used
     to name its grade in prose — `graded ERROR`, `graded WARN`, `graded OK` — while
-    `SUBNODES` is a module constant that cannot see `severity_map`. A deployment that
+    it was a module constant that cannot see `severity_map`. A deployment that
     graded `medium` as WARN therefore read **`graded ERROR`** on the medium band's own
     page: not a text that withheld the setting, a text that stated the wrong one.
 
-    What a severity *means* stays in the prose; what it is *graded* is expanded from
-    the map in force, into the band's `config` card."""
-    assert SUBNODES                                     # not vacuously true
-    for band, text in SUBNODES.items():
-        rendered = text["about"]
+    No constant names a code since, nor a status's sign: the sign a band's `about`
+    says what to do by is the map's in force, and so is the grading its handbook
+    and its `config` card state."""
+    for text in (mod_wiz.ACTING_ABOUT, mod_wiz.QUIET_ABOUT):
         for code in ("ERROR", "WARN", "OK"):
-            assert code not in rendered, f"{band}'s text names {code}"
-        assert "graded" not in rendered.lower(), f"{band}'s text claims a grading"
+            assert code not in text, f"the text names {code}"
+        assert "graded" not in text.lower(), "the text claims a grading"
+        assert not re.search(r"\{(ok|warn|error|maintenance|undefined)\}", text,
+                             re.IGNORECASE), "the text names a sign of its own"
+    medium = _check(severity_map={"medium": StatusCode.WARN}).subnode_labels["medium"]
+    assert medium["about"].startswith("{warn}: ")
+    assert "{error}" not in medium["about"]
 
 
 def test_a_bands_config_states_the_grade_in_force_not_the_shipped_default(monkeypatch):
@@ -589,7 +704,7 @@ def test_entity_level_lines_are_members_keyed_by_the_wiz_issue_id(monkeypatch):
     result = _run(check, fake, monkeypatch)
     critical = next(c for c in result.children if c.name == "critical")
     assert critical.members
-    assert "Each line is one WIZ issue" in check.subnode_labels["critical"]["about"]
+    assert "Each line is one WIZ issue" in check.subnode_labels["critical"]["handbook"]
     assert [e.slug for e in critical.reason_entries] == ["wiz-abc-123",
                                                          "wiz-def-456"]
 
@@ -608,7 +723,7 @@ def test_default_id_level_groups_entities_by_control_id(monkeypatch):
     critical = next(c for c in result.children if c.name == "critical")
 
     assert ("Each line is one WIZ **control**"
-            in check.subnode_labels["critical"]["about"])
+            in check.subnode_labels["critical"]["handbook"])
     assert [entry.slug for entry in critical.reason_entries] == [
         "wiz-control-wc-1", "wiz-control-wc-2"]
     assert critical.reason_texts[0] == (

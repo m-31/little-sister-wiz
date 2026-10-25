@@ -11,9 +11,9 @@
 type: wiz
 path: /platform/wiz                     # the node this check owns
 title: WIZ security issues
-about: |
-  Open and in-progress security issues from **WIZ** (cloud security), grouped by
-  severity. [All open issues](https://app.wiz.io/issues).
+# What the node reads, in a sentence (little-sister ADR-0133). Its details link WIZ's
+# list of the tenant's open issues on `app_url`, so no text here needs the address.
+description: Open and in-progress security issues from WIZ, a band for each severity.
 frequency: 10m
 # The **whole run's** budget — the token exchange plus up to three query attempts
 # together, each request clamped to whatever is left of it (ADR-0002). Generous because
@@ -78,14 +78,17 @@ ignore_control_ids: []
 #  - wc-1             # accepted risk — name who decided, and when
 #  - wc-2             # covered by a compensating control — name the control
 
-# --- Display text for the severity bands (title / about; little-sister ADR-0025) -
-# Built into the `wiz` check type, so it is not copied per tenant: the `about` prose
-# from its `SUBNODES`, and the title from the severity itself — a colored circle,
-# 🔴 🟠 🟡 🔵 🟢, with ❓ for a severity this package does not name. Add a `subnodes:`
-# block only to change one: your text replaces the built-in default, or extends it
-# where you write {default} inside your text. Write a `title:` there to have the word
-# back. little-sister reads this block itself, so an entry works the same way for
-# every branch check type you install, not only for this one.
+# --- What the bands say (title / about / handbook; little-sister ADR-0133) -------
+# Built into the `wiz` check type, so it is not copied per tenant: the title from the
+# severity itself — a colored circle, 🔴 🟠 🟡 🔵 🟢, with ❓ for a severity this
+# package does not name — an `about` that says what to do when the band holds issues,
+# by the sign `severity_map` gives it, and a handbook every band shows on its Handbook
+# tab. Nothing in them says how soon an issue is fixed: that is this installation's
+# policy. Add a `subnodes:` block to say it, or to change a text: yours replaces the
+# built-in one, or extends it where you write {default} inside yours. Write a `title:`
+# there to have the word back. `details:` under a band's name are rows on its card.
+# little-sister reads this block itself, so an entry works the same way for every
+# branch check type you install, not only for this one.
 #
 # subnodes:
 #   critical:
@@ -93,6 +96,21 @@ ignore_control_ids: []
 #       {default}
 #
 #       Page the on-call; a critical finding is not left overnight.
+#     details:
+#       tickets: SEC
+#
+# The same file takes back how the wall first draws the bands (ADR-0006). The type
+# proposes them as chips, a failing band's box ten lines whatever `reason_cap` says,
+# and a band `severity_map` grades OK — `informational` as shipped — with its issues
+# folded behind ✓ +N ok wherever it is open. To start them open, or give a band's box
+# more lines:
+#
+# chips: false            # the bands, as boxes
+# children:
+#   reason_cap: 20        # a band's box, twenty lines
+# subnodes:
+#   informational:
+#     fold_ok: false      # its issues, shown
 
 # --- What its lines say (optional) ---------------------------------------------
 # An issue's line is written from a **form** the type ships, `issue`, which the

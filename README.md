@@ -11,7 +11,7 @@ band keeps reporting.
 
 ## The contract
 
-- **Requires** `little-sister >= 0.3.21` — a floor, never a pin.
+- **Requires** `little-sister >= 0.3.22` — a floor, never a pin.
 - **Runs on** Python **3.11 or newer** — the library's floor, not a higher
   one of its own.
 - **Registers** one check type: **`wiz`**.
@@ -24,7 +24,7 @@ band keeps reporting.
 # Pin them. A deployment names exact versions so an upgrade is a deliberate edit
 # rather than drift; a plugin is the one that declares a floor, because two plugins
 # that each pinned could not be installed together.
-dependencies = ["little-sister==0.3.21", "little-sister-wiz==0.1.4"]
+dependencies = ["little-sister==0.3.22", "little-sister-wiz==0.1.5"]
 ```
 
 ```python
@@ -60,9 +60,76 @@ region-specific, and guessing it would fail at the first run rather than at load
 Each tenant's check carries its own client credentials, so a second tenant is a
 second config file rather than a code change.
 
-The per-band display text ships **with the type**, so it is not copied per tenant.
-Your deployment's own policy — a remediation deadline, who to page — goes in that
-config's `subnodes:` block, appended to the shipped text with `{default}`.
+What each band says ships **with the type**, so it is not copied per tenant either —
+*What the bands say*, below.
+
+## What the bands say
+
+The bands arrive with their own text, so a tenant's file writes none of it, divided as
+little-sister divides what a node says (its ADR-0133). **Each band ships a title, an
+`about` and a handbook.** The title is the band's colored circle — 🔴 🟠 🟡 🔵 🟢, and
+❓ for a severity this package does not name. The `about` is the short account on the
+node's *About* card: what to do when the band holds issues, said by the status the band
+shows then under your `severity_map` — `{error}` for `critical`, `high` and `medium` as
+shipped, `{warn}` for `low` — with a link into the section of the handbook that says it
+at length, or, for a band graded OK as `informational` is, that nothing waits on it.
+The handbook is one Markdown file this package ships, which every band shows on its
+*Handbook* tab: what the bands read, the grading in force, how a line reads at your
+`aggregation_level`, what to do with an issue in WIZ, the configuration the check takes,
+and that each line can be put into maintenance on its own.
+
+**Every node it writes says what it reads and what it stands for.** A band's description
+is one sentence, the same for every band, and its details, a table on its *About* card,
+link WIZ's own list of the open and in-progress issues of its severity, and those of the
+check's own node the tenant's whole list. Both lists are on `app_url`, and hold what no
+band lists as well: a threat detection, and an issue of a control in
+`ignore_control_ids`.
+
+What ships says nothing of how soon an issue is fixed. A remediation deadline, who to
+page, is your team's policy, and goes in the check's `subnodes:` block, around the
+shipped text where you write `{default}`:
+
+```yaml
+subnodes:
+  critical:
+    about: |
+      {default}
+
+      Page the on-call; a critical issue is not left overnight.
+    details:
+      tickets: SEC             # a row on the critical band's card
+```
+
+The text may reuse what the check is configured with: `{grading}`, the grading in
+force; `{line_note}`, how a line reads at the configured `aggregation_level`;
+`{pin_note}`, that each line can be pinned on its own; and `{entry_note}`, those two
+together, which every band's `about` ended with before the handbook took them. A
+handbook may be a file of your own too, `handbook: handbook/wiz.md`, relative to the
+configuration root, and a `nodes.yaml` entry keyed by path still beats both.
+little-sister reads that block itself, so it works the same way for every check type
+you install.
+
+**How the wall first draws the bands is proposed too**, in the keys little-sister reads
+(its ADR-0128;
+[ADR-0006](docs/adr/0006-the-bands-start-as-chips-and-a-quiet-band-folds-its-lines.md)).
+The bands start as chips, each with its count, and a band your `severity_map` grades OK
+— `informational` as shipped — starts with its issues folded behind *✓ +N ok* wherever
+it is open, its own page among them. A band that fails opens its way, as little-sister
+opens a failure a chip would hide, its box ten lines of its issues whatever
+`reason_cap` your `settings.yaml` says: the rest stand under its *⌄ all N* and on the
+band's page. To start them open, or give a band's box more lines, in the check's own
+file:
+
+```yaml
+chips: false            # the bands, as boxes
+children:
+  reason_cap: 20        # a band's box twenty lines
+subnodes:
+  informational:
+    fold_ok: false      # its issues, shown
+```
+
+and a `nodes.yaml` entry keyed by path beats them all.
 
 ## What it reads
 
@@ -86,7 +153,7 @@ Defend license brings) is not
 | `severity_map` | what a band with findings grades as. Defaults: `critical` / `high` / `medium` → **ERROR**, `low` → **WARN**, `informational` → **OK**. An empty band is always OK |
 | `aggregation_level` | `id` (default) — one line per WIZ **control**, listing every affected entity, each linked to its own issue, slugged `wiz-control-<control-id>`: a configuration rule's issue under the rule's parent control, and an issue whose rules name several controls under the one with the smallest id; `entity` — one line per issue, slugged `wiz-<issue-id>` |
 | `ignore_control_ids` | WIZ control IDs to skip entirely |
-| `app_url` | the WIZ app's address every link on a line is built on — `https://app.wiz.io` by default; one that is not an http(s) URL with a host refuses to load |
+| `app_url` | the WIZ app's address every link on a line is built on — `https://app.wiz.io` by default; one that is not an http(s) URL with a host, or that carries a query or a fragment, refuses to load ([ADR-0005](docs/adr/0005-an-issues-line-is-written-from-a-form.md)) |
 | `first` | issues fetched per run, from 1 to 1000 — WIZ's limit for one query — and 500 by default. A single page, so raise it rather than expecting pagination; a value outside 1 to 1000 refuses to load |
 
 A band with findings takes its mapped status; the check's own node rolls up

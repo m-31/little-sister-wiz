@@ -1,6 +1,6 @@
 [project]
 name = "little-sister-wiz"
-version = "0.1.4"
+version = "0.1.5"
 description = "WIZ cloud-security check type for little-sister."
 authors = [
     { name = "Michael Meyling" }
@@ -35,7 +35,15 @@ requires-python = ">=3.11"
 # a release. The upgrade a floor cannot see, the library moving *past* the
 # surface, is caught by `require_api()` in `__init__.py`.
 #
-# **0.3.21** is the release that writes a line from a form: `Check.line`, and the
+# **0.3.22** is the release in which a node says what it is (little-sister ADR-0133):
+# the details a run writes on a node (`CheckResult.details`), a handbook a type declares
+# beside a band's labels in `subnode_defaults`, and a label that says a status by its
+# sign, `{error}`, and links a section of its node's handbook, `handbook#…`; and which
+# expands a type's tokens in the labels its run hands a child, the handbook of the band
+# of a severity WIZ invents among them. Every band's text and every node this check
+# writes now use them.
+#
+# Beneath it, **0.3.21** writes a line from a form: `Check.line`, and the
 # `line_forms` and `line_words` a type declares (little-sister ADR-0126). Every issue's
 # line goes through it (ADR-0005), and no earlier release has those names — an *added*
 # name, which `require_api()` cannot see, so only the floor stops a resolver installing
@@ -52,7 +60,7 @@ requires-python = ">=3.11"
 # redirect further down — and restores `uv.lock` with it. See `### Requires` in the
 # CHANGELOG for when the floor last moved.
 dependencies = [
-    "little-sister>=0.3.21",
+    "little-sister>=0.3.22",
 ]
 
 # public-urls:begin

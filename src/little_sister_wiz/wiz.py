@@ -25,6 +25,13 @@ written from the form ``issue`` over the issue's record, and a deployment's
 made from every issue of one control, says them as a sentence of this module's and
 carries no record; each entity on it links to its own issue in WIZ.
 
+**What a band says** is divided as little-sister divides what a node says (its
+ADR-0133): its ``about`` says what to do when it holds issues, by the sign the band
+shows then under the map in force, and leads into the handbook every band shares,
+``handbook/issues.md`` beside this module; its description says what it reads; and its
+details link WIZ's own list of its open issues, as the check's own node's link the
+tenant's.
+
 Registered in little-sister's ``CHECK_TYPES`` on import — importing
 ``little_sister_wiz`` is the one line a deployment's ``wsgi.py`` adds, before
 ``little_sister.app``, so the ``wiz`` type is known when the engine loads the check
@@ -49,7 +56,7 @@ import json
 import logging
 import time
 import urllib.parse
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -127,64 +134,107 @@ _TEXT_BYTES = 600
 #: answer, however strange, makes a record the seam refuses (ADR-0003 decision 7).
 _SHORT_BYTES = 100
 
-# Built-in display text for the severity-band leaves this check emits (little-sister
-# ADR-0025). This text is type-inherent, so it is written once here rather than copied
-# into every deployment config; a second tenant's check is then config only. It is
-# **declared, not applied** — `_band_labels` hands it to little-sister as
-# `subnode_defaults` and the library resolves a deployment's `subnodes:` block over
-# it, replacing one of these or extending it where the config writes `{default}`, and
-# the engine writes the result per band name. `nodes.yaml` still wins over both, per
-# node path, and `{entry_note}` is a `label_tokens` entry expanded in either text.
+# What this type says of its bands, divided as little-sister divides what a node says
+# (its ADR-0133). Each band's `about` says what to do when the band holds issues, by
+# the sign the band shows then, and leads into the section of the **handbook** that
+# says it at length: one Markdown file this package ships beside this module, which
+# every band names, since a band differs from another by its severity and its grading
+# alone and the handbook says the grading in force. It says what the bands read, how to
+# read a band and its lines, what to do and how to configure it. What a band reads is
+# its run's `description`, and the object it stands for is in its `details`: WIZ's own
+# list of its open issues, as the check's own node's are the tenant's.
 #
-# **None of them names a code, and that is the rule rather than an omission.** These
-# texts used to read `graded ERROR` / `graded WARN` / `graded OK`, which is a setting
-# written as prose: `severity_map` is what decides a band's code, this constant cannot
-# see it, and a deployment that graded `medium` as WARN read `graded ERROR` on the
-# medium band's own page. What a severity *means* belongs here; what it is *graded*
-# belongs in the band's `config` card, where a reader expects what the check ran with
-# and where it is expanded from the map in force (`_band_config`).
+# It is **declared, not applied**: `_band_labels` hands it to little-sister as
+# `subnode_defaults` and `_band_tokens` its tokens as `label_tokens`, and the library
+# resolves a deployment's `subnodes:` block over it — replacing an about or a handbook,
+# or placing this one where the config writes `{default}` — and the engine writes the
+# result per band name. `nodes.yaml` still wins over both, per node path.
 #
-# **No `title` here either**, and for a related reason: a band's title is derived
-# from its severity (`band_glyph`) rather than written per band, so the row cannot
-# grow a sixth entry whose color nobody chose. What is authored here is prose;
-# `_band_labels` is where the derived half joins it.
-SUBNODES: dict[str, dict[str, str]] = {
-    "critical": {"about": "Critical-severity WIZ issues — fix immediately.\n\n"
-                          "{entry_note}"},
-    "high": {"about": "High-severity WIZ issues — fix on the current sprint.\n\n"
-                      "{entry_note}"},
-    "medium": {"about": "Medium-severity WIZ issues — needs fixing, not only "
-                        "knowing.\n\n{entry_note}"},
-    "low": {"about": "Low-severity WIZ issues — worth knowing, and still work "
-                     "somebody has to schedule.\n\n{entry_note}"},
-    "informational": {"about": "Informational WIZ findings — nothing to do, watched "
-                               "so that a quiet band is visibly quiet.\n\n"
-                               "{entry_note}"},
-}
+# **No text here names a code, and that is the rule rather than an omission.** The
+# abouts used to read `graded ERROR` / `graded WARN` / `graded OK`, which is a setting
+# written as prose: `severity_map` decides a band's code, a constant cannot see it, and
+# a deployment that graded `medium` as WARN read `graded ERROR` on the medium band's
+# own page. So the sign an about names is taken from the map in force when the check is
+# made — `{sign}` below — as the handbook's grading is, through `{grading}`, and each
+# band's `config` card says its own (`_band_config`).
+#
+# **Nor how soon.** *Fix immediately*, *fix on the current sprint*: a remediation
+# deadline is an installation's policy, written in its own `subnodes:` block around this
+# text with `{default}`, and a promise this file cannot keep for a stranger has no
+# business shipping in the package. What ships is what holds for every tenant: where an
+# issue is, and what WIZ lets a team do with it.
+#
+# **No `title` either**, and for a related reason: a band's title is derived from its
+# severity (`band_glyph`) rather than written per band, so the row cannot grow a sixth
+# entry whose color nobody chose. `_band_labels` is where the derived half joins the
+# authored one.
+#
+# **How the wall first draws the bands is declared beside them** (little-sister
+# ADR-0128, ADR-0006): the check's own node proposes its bands as chips and a band's
+# box ten lines, `OWN_LOOK`, since a band's name reaches the band and not the node
+# above it; and a band the map grades OK, whose issues ask for no work, proposes its
+# lines folded, `fold_ok` in its entry — by the map in force, as its about is, so
+# `informational` folds under the shipped map and a band a deployment grades OK folds
+# with it. A deployment takes any of it back in its own file: `chips: false` or
+# `children: {reason_cap: 20}` at its top, `fold_ok: false` under a band's name in its
+# `subnodes:` block.
+HANDBOOK = "handbook/issues.md"
 
-# The paragraph every band's `about` ends with, selected for the configured
-# aggregation level and referenced as `{entry_note}` so it is written once
-# (little-sister ADR-0025). It explains the line format and the operationally
-# important fact that a line is individually pinnable.
-ENTRY_NOTES = {
+#: The lines a band's box proposes (ADR-0006 decision 3): a band opens when it fails,
+#: by little-sister's failure budget, to say why it is red, and ten lines say it with
+#: its first few issues; the rest stand under its *⌄ all N* and on its page.
+BAND_LINES = 10
+
+#: What the check's own node proposes of its first look: its bands as chips, a ladder
+#: of a handful of leaves each read by its count, and each band's box
+#: :data:`BAND_LINES` lines, said of its children so that a band only WIZ's findings
+#: name takes it too (little-sister ADR-0128, ADR-0006).
+OWN_LOOK: dict[str, object] = {"chips": True, "children": {"reason_cap": BAND_LINES}}
+
+#: A band's `about` where its issues ask for work — where the map in force grades a
+#: band holding issues `WARN` or `ERROR` — with that status's sign for `{sign}`.
+ACTING_ABOUT = (
+    "{sign}: open each issue from its line and fix what WIZ found on the entity, "
+    "setting the issue in progress in WIZ meanwhile — or ignore it there with its "
+    "reason; [what to do](handbook#when-a-band-holds-issues).")
+#: A band's `about` where they ask for none: a band the map grades `OK` with issues,
+#: as it grades `informational` unless a deployment says otherwise.
+QUIET_ABOUT = (
+    "Nothing to do: with issues this band reads {sign}, and lists them for "
+    "information; [how to read it](handbook#how-to-read-it).")
+
+#: What every band reads, in one sentence (little-sister ADR-0133 decision 2), the
+#: band's name beside it saying which severity.
+BAND_DESCRIPTION = ("The open and in-progress WIZ issues of this severity that a "
+                    "Control or a configuration rule raised.")
+
+# How a band's lines read, and that each can be pinned on its own, for the configured
+# aggregation level: the handbook's `{line_note}` and `{pin_note}`, and together
+# `{entry_note}`, the paragraph every band's `about` ended with until the handbook took
+# it — kept, because a deployment's own text may name it.
+LINE_NOTES = {
     "id": (
         "Each line is one WIZ **control**, followed by every entity it flagged and "
         "that entity's kind, each linked to its own issue in WIZ. A finding marked "
-        "*in progress* is already being worked on in WIZ. Because the line carries "
-        "the control ID, each control is separately addressable: put **that one "
-        "line** into maintenance while you work on it and the rest of the band "
-        "keeps reporting."
-    ),
+        "*in progress* is already being worked on in WIZ."),
     "entity": (
         "Each line is one WIZ issue: the **affected entity** and its kind, then "
         "the control that flagged it, linked into WIZ, and when WIZ detected it — "
         "and when it is due, where an SLA gives it a date. A line marked "
-        "*in progress* is already being worked on in WIZ. Because a WIZ issue "
-        "carries its own "
-        "ID, each line is separately addressable: put **that one line** into "
-        "maintenance while you work on it and the rest of the band keeps reporting."
-    ),
+        "*in progress* is already being worked on in WIZ."),
 }
+PIN_NOTES = {
+    "id": (
+        "Because the line carries the control ID, each control is separately "
+        "addressable: put **that one line** into maintenance while you work on it and "
+        "the rest of the band keeps reporting."),
+    "entity": (
+        "Because a WIZ issue carries its own ID, each line is separately addressable: "
+        "put **that one line** into maintenance while you work on it and the rest of "
+        "the band keeps reporting."),
+}
+ENTRY_NOTES = {level: f"{LINE_NOTES[level]} {PIN_NOTES[level]}"
+               for level in AGGREGATION_LEVELS}
 # Backwards-compatible name for callers that display the default band's note.
 ENTRY_NOTE = ENTRY_NOTES[DEFAULT_AGGREGATION_LEVEL]
 
@@ -308,26 +358,93 @@ def band_glyph(severity: str) -> str:
     return BAND_GLYPHS.get(severity, UNKNOWN_BAND_GLYPH)
 
 
-def _band_labels(severities: Iterable[str]) -> dict[str, dict[str, str]]:
-    """What this type **declares** for each band it can name at construction —
-    `name -> {title, about}`, little-sister's `subnode_defaults` (its ADR-0025).
+def _band_about(code: StatusCode) -> str:
+    """A band's `about` for the code a band holding issues grades as under the map in
+    force: what to do, said by that status's sign — `{warn}` where it is WARN — or
+    that nothing waits on the band where its issues ask for no work."""
+    text = (ACTING_ABOUT if code in (StatusCode.WARN, StatusCode.ERROR)
+            else QUIET_ABOUT)
+    return text.replace("{sign}", "{" + code.name.lower() + "}")
 
-    Two halves meet here: the authored prose of :data:`SUBNODES`, and the derived
-    `title` — the band's glyph, which is a function of the severity rather than a
-    line somebody wrote. A band with no prose still declares its circle, so a
-    severity a `severity_map` names and this package does not describe is
-    labeled rather than bare, and a deployment writing `{default}` into a title
-    for it still gets that circle back.
 
-    What this cannot cover is a severity that appears **only in a run's
-    findings** — WIZ inventing one tomorrow. That band is named by the data, so
-    its glyph rides its `CheckResult`, which is the channel little-sister leaves
-    open for exactly that child.
+def _band_labels(severity_map: Mapping[str, StatusCode]
+                 ) -> dict[str, dict[str, object]]:
+    """What this type **declares** for each band the map in force names —
+    `name -> {title, about, handbook}`, little-sister's `subnode_defaults` (its
+    ADR-0025 and ADR-0133) — the five declared severities among them, since the map in
+    force starts from :data:`DEFAULT_SEVERITY_MAP`. A band the map grades OK, whose
+    issues ask for no work, declares beside them that its lines start folded,
+    ``fold_ok`` (little-sister ADR-0128, ADR-0006): the rule its about follows.
+
+    Two halves meet here: the authored text — the `about` for the code the band's
+    issues grade it as, and the handbook every band shares — and the derived `title`,
+    the band's glyph, which is a function of the severity rather than a line somebody
+    wrote. A severity a `severity_map` names and this package does not is declared as
+    the five are, its circle `❓`, so a deployment writing `{default}` into a title for
+    it still gets that circle back.
+
+    What this cannot cover is a severity that appears **only in a run's findings** —
+    WIZ inventing one tomorrow. That band is named by the data, so its glyph, its
+    `about` and the handbook ride its `CheckResult`, which is the channel little-sister
+    leaves open for exactly that child, and which expands the type's tokens as what is
+    declared does (its ADR-0133 decision 2): such a band says what every band says.
     """
-    return {severity: {"title": band_glyph(severity),
-                       **({"about": about} if (about := SUBNODES.get(
-                           severity, {}).get("about", "")) else {})}
-            for severity in sorted({*severities, *SUBNODES})}
+    return {severity: {"title": band_glyph(severity), "about": _band_about(code),
+                       "handbook": HANDBOOK,
+                       **({"fold_ok": True} if code is StatusCode.OK else {})}
+            for severity, code in sorted(severity_map.items())}
+
+
+def _ordered_bands(severity_map: Mapping[str, StatusCode]) -> list[str]:
+    """The declared severities first, then any a config added, by name.
+
+    The run's own loop orders by the severities *the data* brought as well, which this
+    cannot see; what it shares with that loop is the part that is a decision rather
+    than an observation — `SEVERITY_ORDER` first."""
+    return [*SEVERITY_ORDER,
+            *sorted(s for s in severity_map if s not in SEVERITY_ORDER)]
+
+
+def _grading_of(severity_map: Mapping[str, StatusCode]) -> str:
+    """The whole map **in force**, as the check's own `config` card and the handbook's
+    `{grading}` say it.
+
+    Here rather than in any `about` text because it is a setting, and because a
+    deployment that overrode `severity_map` has to be able to read *its* answer
+    somewhere; the band pages carry one row each, and these are the places all of them
+    are visible together."""
+    names = [name for name in _ordered_bands(severity_map) if name in severity_map]
+    codes = [severity_map[name] for name in names]
+    if not codes:
+        return "nothing graded"
+    if len(set(codes)) == 1:
+        # One answer for every band is worth saying once. Five identical arrows
+        # are a wall a reader skips, and skipping is how the setting stays
+        # invisible — which is the whole complaint this line answers.
+        return f"**{codes[0].name}** for every band"
+    return ", ".join(f"`{name}` → **{severity_map[name].name}**" for name in names)
+
+
+def _grading_sentence(severity_map: Mapping[str, StatusCode]) -> str:
+    """The grading in force as the handbook says it, where it opens *How to read it*:
+    the map as the check's card says it, the fallback a severity it does not name
+    takes, and what a band with no issues reads."""
+    return (f"A band holding issues is graded by `severity_map` — "
+            f"{_grading_of(severity_map)} — and a band of a severity the map does not "
+            f"name **WARN**. A band holding none reads `OK`, so a watched band's "
+            f"silence is visible.")
+
+
+def _band_tokens(severity_map: Mapping[str, StatusCode],
+                 level: str) -> dict[str, str]:
+    """What a band's text may name as `{token}` (little-sister ADR-0025), expanded in
+    its `about` and its handbook as they are declared or written under `subnodes:`
+    (its ADR-0133): the grading in force, and how a line reads and that each can be
+    pinned on its own at the configured aggregation level — the two together as
+    `{entry_note}`, the name a deployment's text has used for them."""
+    return {"grading": _grading_sentence(severity_map),
+            "line_note": LINE_NOTES[level], "pin_note": PIN_NOTES[level],
+            "entry_note": ENTRY_NOTES[level]}
 
 # Default severity to status mapping when the config does not override it. `low` is
 # WARN rather than OK: a low finding is still work somebody has to schedule, and a
@@ -416,6 +533,25 @@ def _fault_and_wait(response: Response) -> tuple[Fault, float | None]:
     return fault_for(response.status), asked
 
 
+def _issues_filter(severity: str) -> str:
+    """The WIZ app's filter of the open and in-progress issues — of one severity where
+    one is named — as its issues page reads it from its address (ported from the
+    original)."""
+    status = "status~(equals~(~'OPEN~'IN_PROGRESS))"
+    if not severity:
+        return f"filters~({status})"
+    return f"filters~({status}~severity~(equals~(~'{severity.upper()})))"
+
+
+def _issues_link(app_url: str, severity: str = "") -> str:
+    """The WIZ app's list of the open and in-progress issues, on ``app_url`` — of one
+    severity where one is named: a band's details link it, and the check's own node's
+    the whole list (little-sister ADR-0133 decision 6). It is WIZ's list, so it holds
+    what this check does not list as well: a threat detection, which no run reads
+    (ADR-0004 decision 2), and an issue of a control in ``ignore_control_ids``."""
+    return f"{app_url}/issues#~({_issues_filter(severity)})"
+
+
 def _issue_link(app_url: str, issue_id: str, severity: str) -> str:
     """The WIZ app's page for one issue, on ``app_url``: the issue opened over the
     list of the open and in-progress issues of its severity (ported from the
@@ -423,9 +559,7 @@ def _issue_link(app_url: str, issue_id: str, severity: str) -> str:
     and nothing where WIZ sent no id."""
     if not issue_id:
         return ""
-    sev = severity.upper()
-    return (f"{app_url}/issues#~(filters~(status~(equals~(~'OPEN~'IN_PROGRESS))"
-            f"~severity~(equals~(~'{sev})))~issue~'{issue_id})")
+    return f"{app_url}/issues#~({_issues_filter(severity)}~issue~'{issue_id})"
 
 
 def _app_url(value: object) -> str:
@@ -736,8 +870,9 @@ def _control_entry(control_id: str, records: Sequence[Mapping[str, Any]],
                  f"**{plain(control_name)}** — {', '.join(affected)}")
 
 
-def _failed(failure: Mapping[str, Any]) -> CheckResult:
-    """What a failed read means, from the fault it recorded (ADR-0002 decision 5).
+def _failed(failure: Mapping[str, Any], details: Mapping[str, str]) -> CheckResult:
+    """What a failed read means, from the fault it recorded (ADR-0002 decision 5), on
+    the check's own node, which names the tenant's issues in WIZ all the same.
 
     **A read failure is not a finding about the tenant.** *We could not ask* warns —
     a transient failure, and the run's own budget running out; an answer WIZ gave,
@@ -749,11 +884,12 @@ def _failed(failure: Mapping[str, Any]) -> CheckResult:
     """
     error = plain(str(failure["error"]))
     if failure["fault"] == "deadline":
-        return CheckResult(StatusCode.WARN, [error])
+        return CheckResult(StatusCode.WARN, [error], details=details)
     if failure["fault"] == Fault.TRANSIENT.name.lower():
         return CheckResult(StatusCode.WARN,
-                           [f"could not ask WIZ this run: {error}"])
-    return CheckResult(StatusCode.ERROR, [f"WIZ query failed: {error}"])
+                           [f"could not ask WIZ this run: {error}"], details=details)
+    return CheckResult(StatusCode.ERROR, [f"WIZ query failed: {error}"],
+                       details=details)
 
 
 @dataclass(frozen=True)
@@ -986,7 +1122,8 @@ class WizCheck(Check):
                 f"shorter client_id reference fits")
         super().__init__(subject=subject,
                          subnode_defaults=_band_labels(severities),
-                         label_tokens={"entry_note": ENTRY_NOTES[level]},
+                         node_defaults=OWN_LOOK,
+                         label_tokens=_band_tokens(severities, level),
                          line_forms=LINE_FORMS, line_words=LINE_WORDS,
                          line_fields=LINE_FIELDS, **kwargs)
         # Resolved **once here** from the references the config's `secrets:`
@@ -1038,38 +1175,9 @@ class WizCheck(Check):
             "api": self.api_url,
             "app": self.app_url,
             "aggregation": f"{self.aggregation_level} level",
-            "grading": self._grading_summary(),
+            "grading": _grading_of(self.severity_map),
             "ignored controls": str(len(self.ignore_control_ids) or ""),
         })
-
-    def _grading_summary(self) -> str:
-        """The whole map **in force**, for the check's own `config` card.
-
-        Here rather than in any `about` text because it is a setting, and because a
-        deployment that overrode `severity_map` has to be able to read *its* answer
-        somewhere; the band pages carry one row each, and this is the one place all
-        of them are visible together."""
-        codes = [self.severity_map[name] for name in self._band_order()
-                 if name in self.severity_map]
-        if not codes:
-            return "nothing graded"
-        if len(set(codes)) == 1:
-            # One answer for every band is worth saying once. Five identical arrows
-            # are a wall a reader skips, and skipping is how the setting stays
-            # invisible — which is the whole complaint this line answers.
-            return f"**{codes[0].name}** for every band"
-        return ", ".join(
-            f"`{name}` → **{self.severity_map[name].name}**"
-            for name in self._band_order() if name in self.severity_map)
-
-    def _band_order(self) -> list[str]:
-        """The declared severities first, then any a config added, by name.
-
-        The run's own loop orders by the severities *the data* brought as well, which
-        this cannot see; what it shares with that loop is the part that is a decision
-        rather than an observation — `SEVERITY_ORDER` first."""
-        return [*SEVERITY_ORDER,
-                *sorted(s for s in self.severity_map if s not in SEVERITY_ORDER)]
 
     def _band_config(self, severity: str) -> str:
         """What this band ran with — the two facts a reader needs on its page.
@@ -1088,6 +1196,19 @@ class WizCheck(Check):
                        "entry, so the fallback applies"),
             "when empty": "`OK`, so a watched band's silence is visible",
         })
+
+    def _tenant_details(self) -> dict[str, str]:
+        """The details of the object the check's own node stands for, the tenant this
+        check reads (little-sister ADR-0133 decision 6): WIZ's list of its open and
+        in-progress issues, on `app_url`. Written on every run, a failed one among
+        them, since a read that failed is when a reader goes to WIZ to look."""
+        return {"issues": f"[All open issues]({_issues_link(self.app_url)})"}
+
+    def _band_details(self, severity: str) -> dict[str, str]:
+        """A band's details: WIZ's list of the open and in-progress issues of its
+        severity, on `app_url` — the list each of its issues' own pages opens over."""
+        return {"issues": f"[All open {plain(severity)} issues]"
+                          f"({_issues_link(self.app_url, severity)})"}
 
     def _new_deadline(self) -> Deadline:
         """This run's budget. Overridden in tests, so a deadline can be spent without
@@ -1215,6 +1336,7 @@ class WizCheck(Check):
         issues are what the bands list. ``now`` is not read — nothing this check
         says depends on when it is said.
         """
+        tenant = self._tenant_details()
         estate: Mapping[str, Any] | None = None
         issues: list[Measurement] = []
         for measurement in measurements:
@@ -1228,9 +1350,10 @@ class WizCheck(Check):
             # engine grades that run itself; this is the guard for a caller handing
             # over something no measurement of ours produced.
             return CheckResult(StatusCode.ERROR,
-                               ["no estate reading to grade — nothing was read"])
+                               ["no estate reading to grade — nothing was read"],
+                               details=tenant)
         if estate["failure"] is not None:
-            return _failed(estate["failure"])
+            return _failed(estate["failure"], tenant)
 
         groups: dict[str, list[Measurement]] = {}
         for reading in issues:
@@ -1259,19 +1382,25 @@ class WizCheck(Check):
             lines = (self._id_lines(items, severity)
                      if self.aggregation_level == "id"
                      else [self._issue_line(reading, severity) for reading in items])
+            # A band this check could name at construction is **declared**, and the
+            # library writes its labels; what is left here is the band a run
+            # *discovered* — a severity WIZ invented — which nothing could have
+            # declared and which would otherwise wear no circle, say nothing and
+            # have no handbook. Its labels ride its result, field by field as the
+            # library reads them, and the library expands their tokens there too.
+            declared = self.subnode_labels.get(severity, {})
             children.append(CheckResult(
                 code, lines, entries=True, name=severity,
-                description=f"{severity.capitalize()} WIZ issues",
-                # A band this check could name at construction is **declared**,
-                # and the library writes its label; what is left here is the band
-                # a run *discovered* — a severity WIZ invented — which nothing
-                # could have declared and which would otherwise wear no circle.
-                title=("" if severity in self.subnode_labels
-                       else band_glyph(severity)),
+                description=BAND_DESCRIPTION, details=self._band_details(severity),
+                title="" if "title" in declared else band_glyph(severity),
+                about=("" if "about" in declared else _band_about(
+                    self.severity_map.get(severity, StatusCode.WARN))),
+                handbook="" if "handbook" in declared else HANDBOOK,
                 order=band_rank(severity),
                 config=self._band_config(severity)))
         # A container, not a claim (ADR-0003 decision 5). The node declares nothing
         # and rolls up worst-of its bands, as ADR-0001 decision 1 always said — and
         # so the estate a series keeps carries the tenant's worst band as the code
         # that stood, where an `OK` here would have kept `OK` on every run.
-        return CheckResult(StatusCode.UNDEFINED, children=tuple(children))
+        return CheckResult(StatusCode.UNDEFINED, children=tuple(children),
+                           details=tenant)
