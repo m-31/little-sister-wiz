@@ -46,7 +46,7 @@ them has a history and what that history is of are
 ``docs/adr/0003-a-run-is-the-exposure-and-its-issues.md``.
 
 Everything imported from little-sister below is part of its **check-authoring
-surface** (architecture.md §11), which is what the ``require_api(3)`` in this
+surface** (architecture.md §11), which is what the ``require_api(4)`` in this
 package's ``__init__`` pins.
 """
 from __future__ import annotations
@@ -105,6 +105,14 @@ TOKEN_URL = "https://auth.app.wiz.io/oauth/token"
 APP_URL = "https://app.wiz.io"
 AGGREGATION_LEVELS = ("id", "entity")
 DEFAULT_AGGREGATION_LEVEL = "id"
+
+#: **The keys this type's file takes** beside every check's (little-sister ADR-0151):
+#: the API and the app it reads, how much it asks for, its map of severities, the
+#: controls it leaves out, the level it aggregates at and the `secrets:` block. Any
+#: other key at the top of the file stops the start, naming these, which is all a key
+#: this type retires needs.
+CONFIG_KEYS = ("api_url", "token_url", "app_url", "first", "severity_map",
+               "ignore_control_ids", "aggregation_level", "secrets")
 
 #: How many extra attempts a **transient** failure gets. Two, which is the three
 #: attempts the hand-rolled loop this replaced already made — the count is preserved
@@ -1120,7 +1128,7 @@ class WizCheck(Check):
                 f"— past the {MAX_SUBJECT_LENGTH} a subject may have. It is refused "
                 f"rather than cut, because a cut name could be another estate's; a "
                 f"shorter client_id reference fits")
-        super().__init__(subject=subject,
+        super().__init__(subject=subject, config_keys=CONFIG_KEYS,
                          subnode_defaults=_band_labels(severities),
                          node_defaults=OWN_LOOK,
                          label_tokens=_band_tokens(severities, level),

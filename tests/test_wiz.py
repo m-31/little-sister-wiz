@@ -885,6 +885,52 @@ def _shipped(*parts):
     return Path(__file__).resolve().parents[1].joinpath(*parts).read_text()
 
 
+class _Recording(dict):
+    """A configuration that remembers every key a reader looked up, in each of the
+    three ways a reader looks: ``get``, ``in`` and ``[]``."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.asked = set()
+
+    def __getitem__(self, key):
+        self.asked.add(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self.asked.add(key)
+        return super().get(key, default)
+
+    def __contains__(self, key):
+        self.asked.add(str(key))
+        return super().__contains__(key)
+
+
+def test_what_the_type_states_is_what_its_reader_asks_for():
+    """Every top-level key its reader looks up is one it states, and every key it
+    states is one its reader looks up (little-sister ADR-0151): a stated key whose
+    reader has gone is the one case the start does not refuse."""
+    config = _Recording({"api_url": "https://api.example.app.wiz.io/graphql",
+                         "secrets": {"client_id": "env://A", "client_secret": "env://B"}})
+    WizCheck._extra_from_config(config, Path("."))
+    assert config.asked == set(mod_wiz.CONFIG_KEYS)
+
+
+def test_the_shipped_example_loads_through_the_loader(tmp_path):
+    """The example carries every key, so a key the type reads and does not state
+    stops it — and a key nothing takes at its top level stops it too."""
+    from little_sister.checks import load_checks
+    (tmp_path / "checks").mkdir()
+    file = tmp_path / "checks" / "wiz.yaml"
+    file.write_text(_shipped("examples", "wiz.yaml"))
+    (check,) = load_checks(str(tmp_path))
+    assert check.config_keys == mod_wiz.CONFIG_KEYS
+    file.write_text(_shipped("examples", "wiz.yaml") + "frist: 100\n")
+    with pytest.raises(CheckError, match=r"wiz\.yaml: unknown key\(s\) at the top "
+                                         r"level: frist \(wiz takes: api_url, "):
+        load_checks(str(tmp_path))
+
+
 def _commented(text, opening):
     """The block a shipped example holds commented out under ``opening``, loaded as
     a deployment writes it once it takes the `# ` off: the opening line and every

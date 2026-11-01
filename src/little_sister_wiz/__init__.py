@@ -17,7 +17,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from little_sister.checks import require_api
 
-require_api(3)
+require_api(4)
 
 from little_sister_wiz import wiz  # noqa: E402  registers the type
 

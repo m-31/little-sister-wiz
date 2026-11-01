@@ -11,6 +11,32 @@ the code says so.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-01
+
+**This package speaks check API epoch 4, and needs the little-sister release that
+does, 0.3.23.** Beside an older library it refuses at startup, naming both epochs, so a
+deployment moves both pins together (*Requires*).
+
+**A key the `wiz` type does not take stops the start at the top of the check's file**,
+naming the file, the key and the keys it takes, where such a key loaded and did nothing;
+every key a `wiz` check takes today is among them (*Changed*).
+
+### Changed
+
+- **A key the type does not take stops the start at the check's top level** —
+  little-sister's refusal, this type stating the keys it takes (its ADR-0151): a
+  misspelling such as `frist: 100` is refused, naming the file, the key and what the
+  type takes, where it loaded and did nothing.
+
+### Requires
+
+- **little-sister 0.3.23 or newer.** The floor rises from 0.3.22 because 0.3.23 is the
+  first release that speaks check API epoch 4, in which a type states the keys its file
+  takes and little-sister refuses any other there (little-sister ADR-0151); this package
+  declares it with `require_api(4)`, so an older library refuses it at startup, naming
+  both epochs. Upgrade the library and this package together; a file that writes only
+  keys the type takes changes with neither.
+
 ## [0.1.5] - 2026-10-25
 
 **This release installs only beside little-sister 0.3.22 or newer**, the release in
